@@ -10,14 +10,14 @@ import io
 # ==========================================
 st.set_page_config(page_title="Returns Roster Generator", page_icon="🔄", layout="centered")
 
-st.title("🔄 Automated Returns Roster")
-st.markdown("Upload your standardized **Returns_Roster.xlsx** template below to generate the monthly schedule.")
+st.title("🔄 Automated Returns Roster (3-Shift)")
+st.markdown("Upload your standardized **Returns_Roster.xlsx** template below. \n*Includes fluid Morning ↔ Day transitions & New Joiner Logic.*")
 
 uploaded_file = st.file_uploader("Upload Input Excel File (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
     if st.button("🚀 Generate Roster", use_container_width=True):
-        with st.spinner("Crunching numbers and balancing shifts within 33-40% limits... Please wait."):
+        with st.spinner("Applying New Joiner logic and 3-shift balancing... Please wait."):
             try:
                 # ==========================================
                 # 2. LOAD STANDARDIZED DATA
@@ -48,7 +48,7 @@ if uploaded_file is not None:
                 roster_days = pd.date_range(start=roster_start, end=roster_end)
 
                 # ==========================================
-                # 3. INITIALIZE EMPLOYEES 
+                # 3. INITIALIZE EMPLOYEES (V17 - New Joiners)
                 # ==========================================
                 emp_state = {}
                 
@@ -60,11 +60,13 @@ if uploaded_file is not None:
                     prev_data = df_prev[df_prev['Emp_ID'] == emp_id]
                     
                     target_wos = 4
+                    emp_doj = None
+                    
                     if pd.notna(row['Date_of_Joining']):
                         try:
-                            doj = pd.to_datetime(row['Date_of_Joining'])
-                            if doj >= roster_start:
-                                active_days = max(0, (roster_end - doj).days + 1)
+                            emp_doj = pd.to_datetime(row['Date_of_Joining'])
+                            if emp_doj >= roster_start:
+                                active_days = max(0, (roster_end - emp_doj).days + 1)
                                 target_wos = active_days // 6
                         except:
                             pass 
@@ -75,16 +77,23 @@ if uploaded_file is not None:
                     if not prev_data.empty:
                         prev_row = prev_data.iloc[0]
                         for d in reversed(prev_date_cols):
-                            if d not in prev_row: continue
+                            # Handle empty cells for people who didn't exist last month
+                            if pd.isna(prev_row[d]):
+                                if streak == 0: last_shift_state = 'FREE'
+                                break
+                                
                             val = str(prev_row[d]).strip().upper()
+                            if val in ['NAN', 'NONE', '']:
+                                if streak == 0: last_shift_state = 'FREE'
+                                break
                             
-                            if val in ['P-M', 'P-E', 'P-D', 'E', 'M', 'D']:
-                                if streak == 0: last_shift_state = 'D'
+                            if val in ['P(D)', 'MORNING', 'DAY', 'M', 'D']:
+                                if streak == 0: last_shift_state = 'DAYTIME'
                                 streak += 1
-                            elif val in ['P-N', 'N']:
+                            elif val in ['P(N)', 'NIGHT', 'N']:
                                 if streak == 0: last_shift_state = 'N'
                                 streak += 1
-                            elif val in ['WOD', 'L-D', 'L-N', 'A-D', 'A-N']:
+                            elif val in ['WO', 'L', 'A', 'WOD']:
                                 if streak == 0: last_shift_state = 'FREE'
                                 break 
                                 
@@ -118,6 +127,7 @@ if uploaded_file is not None:
                     emp_state[emp_id] = {
                         'Role': row['Role'],
                         'Gender': row['Gender'],
+                        'DOJ': emp_doj,
                         'WOs_Remaining': target_wos,
                         'Starting_WOs': target_wos,
                         'Current_Streak': streak,
@@ -144,8 +154,19 @@ if uploaded_file is not None:
                         target_row = df_targets[(df_targets['Date'] == day) & (df_targets['Role'] == role)]
                         is_zero_wo = target_row.iloc[0]['Zero_WO_Day'] if not target_row.empty else False
                         
+                        morning_pct = 0.50
+                        if 'Morning_Pct' in df_targets.columns and not target_row.empty:
+                            val = target_row.iloc[0]['Morning_Pct']
+                            if pd.notna(val): morning_pct = float(val)
+                        
                         active_emps = []
                         for emp in role_emps:
+                            # 1. NEW JOINER BLOCKER: Do not roster if they haven't joined yet
+                            emp_doj = emp_state[emp]['DOJ']
+                            if emp_doj and day < emp_doj:
+                                emp_state[emp]['Schedule'][day] = 'Not Joined'
+                                continue
+                                
                             leave_df = df_leaves[(df_leaves['Emp_ID'] == emp) & (df_leaves['Date'] == day)]
                             if not leave_df.empty:
                                 emp_state[emp]['Schedule'][day] = 'L'
@@ -155,6 +176,8 @@ if uploaded_file is not None:
                                 active_emps.append(emp)
                                 
                         total_active = len(active_emps)
+                        if total_active == 0: continue # Skip if no one is active today
+                        
                         must_wo = []
                         total_wos_remaining_for_role = sum([emp_state[e]['WOs_Remaining'] for e in active_emps])
                         
@@ -184,16 +207,15 @@ if uploaded_file is not None:
                         if not is_zero_wo and len(assigned_wos) < dynamic_wo_target:
                             planned_mp_est = total_active - dynamic_wo_target
                             
-                            # RETURNS DEPT: 33-40% Night target affects WO balancing logic
                             target_n_est_max = math.floor(planned_mp_est * 0.40)
-                            target_d_est_max = math.floor(planned_mp_est * 0.67) 
+                            target_daytime_est_max = math.ceil(planned_mp_est * 0.67) 
                             
                             rem_active = [e for e in active_emps if e not in assigned_wos]
                             curr_locked_n = len([e for e in rem_active if emp_state[e]['Lock_State'] == 'N'])
-                            curr_locked_d = len([e for e in rem_active if emp_state[e]['Lock_State'] == 'D'])
+                            curr_locked_daytime = len([e for e in rem_active if emp_state[e]['Lock_State'] == 'DAYTIME'])
                             
                             surplus_n = curr_locked_n - target_n_est_max
-                            surplus_d = curr_locked_d - target_d_est_max
+                            surplus_daytime = curr_locked_daytime - target_daytime_est_max
 
                             candidates = []
                             for e in rem_active:
@@ -203,7 +225,6 @@ if uploaded_file is not None:
                                         continue 
                                     if (days_left - 1) > (state['WOs_Remaining'] - 1) * 10 + 9:
                                         continue
-
                                     candidates.append(e)
                                     
                             def wo_sort_key(x):
@@ -211,7 +232,7 @@ if uploaded_file is not None:
                                 balance_boost = 0
                                 if surplus_n > 0 and state['Lock_State'] == 'N':
                                     balance_boost = 10000
-                                elif surplus_d > 0 and state['Lock_State'] == 'D':
+                                elif surplus_daytime > 0 and state['Lock_State'] == 'DAYTIME':
                                     balance_boost = 10000
                                 
                                 cooldown_penalty = 0
@@ -235,23 +256,13 @@ if uploaded_file is not None:
                                 working_emps.append(emp)
                                 
                         planned_mp = len(working_emps)
+                        if planned_mp == 0: continue
                         
-                        # RETURNS DEPT: Shift assignment limits (33% to 40%)
                         max_target_n = math.floor(planned_mp * 0.40)
                         
                         locked_n = [e for e in working_emps if emp_state[e]['Lock_State'] == 'N']
-                        locked_d = [e for e in working_emps if emp_state[e]['Lock_State'] == 'D']
                         free_pool = [e for e in working_emps if emp_state[e]['Lock_State'] == 'FREE']
                         
-                        for emp in locked_n:
-                            emp_state[emp]['Schedule'][day] = 'N'
-                            emp_state[emp]['Night_Count'] += 1
-                            emp_state[emp]['Current_Streak'] += 1
-                            
-                        for emp in locked_d:
-                            emp_state[emp]['Schedule'][day] = 'D'
-                            emp_state[emp]['Current_Streak'] += 1
-                            
                         curr_n = len(locked_n)
                         
                         eligible_free_males = []
@@ -269,23 +280,31 @@ if uploaded_file is not None:
                         ))
                         
                         final_n_picks = []
-                        
-                        # Fill strictly up to the limit
                         for emp in eligible_free_males:
                             if curr_n < max_target_n:
                                 final_n_picks.append(emp)
                                 curr_n += 1
 
-                        for emp in free_pool:
-                            if emp in final_n_picks:
-                                emp_state[emp]['Schedule'][day] = 'N'
-                                emp_state[emp]['Night_Count'] += 1
-                                emp_state[emp]['Current_Streak'] += 1
-                                emp_state[emp]['Lock_State'] = 'N' 
+                        for emp in locked_n + final_n_picks:
+                            emp_state[emp]['Schedule'][day] = 'Night'
+                            emp_state[emp]['Night_Count'] += 1
+                            emp_state[emp]['Current_Streak'] += 1
+                            emp_state[emp]['Lock_State'] = 'N' 
+
+                        daytime_emps = [e for e in working_emps if e not in locked_n and e not in final_n_picks]
+                        
+                        target_morning = round(len(daytime_emps) * morning_pct)
+                        assigned_morning = 0
+                        
+                        for emp in daytime_emps:
+                            if assigned_morning < target_morning:
+                                emp_state[emp]['Schedule'][day] = 'Morning'
+                                assigned_morning += 1
                             else:
-                                emp_state[emp]['Schedule'][day] = 'D'
-                                emp_state[emp]['Current_Streak'] += 1
-                                emp_state[emp]['Lock_State'] = 'D' 
+                                emp_state[emp]['Schedule'][day] = 'Day'
+                                
+                            emp_state[emp]['Current_Streak'] += 1
+                            emp_state[emp]['Lock_State'] = 'DAYTIME'
 
                 # ==========================================
                 # 5. PREPARE APP DOWNLOAD
