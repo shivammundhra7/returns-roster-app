@@ -11,13 +11,13 @@ import io
 st.set_page_config(page_title="Returns Roster Generator", page_icon="🔄", layout="centered")
 
 st.title("🔄 Automated Returns Roster (3-Shift)")
-st.markdown("Upload your standardized **Returns_Roster.xlsx** template below. \n*Includes fluid Morning ↔ Day transitions & New Joiner Logic.*")
+st.markdown("Upload your standardized **Returns_Roster.xlsx** template below. \n*Includes fluid Morning ↔ Day transitions & Strict Escape Hatches.*")
 
 uploaded_file = st.file_uploader("Upload Input Excel File (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
     if st.button("🚀 Generate Roster", use_container_width=True):
-        with st.spinner("Applying New Joiner logic and 3-shift balancing... Please wait."):
+        with st.spinner("Applying strict max-night escape hatches... Please wait."):
             try:
                 # ==========================================
                 # 2. LOAD STANDARDIZED DATA
@@ -48,7 +48,7 @@ if uploaded_file is not None:
                 roster_days = pd.date_range(start=roster_start, end=roster_end)
 
                 # ==========================================
-                # 3. INITIALIZE EMPLOYEES (V17 - New Joiners)
+                # 3. INITIALIZE EMPLOYEES
                 # ==========================================
                 emp_state = {}
                 
@@ -77,7 +77,6 @@ if uploaded_file is not None:
                     if not prev_data.empty:
                         prev_row = prev_data.iloc[0]
                         for d in reversed(prev_date_cols):
-                            # Handle empty cells for people who didn't exist last month
                             if pd.isna(prev_row[d]):
                                 if streak == 0: last_shift_state = 'FREE'
                                 break
@@ -161,7 +160,6 @@ if uploaded_file is not None:
                         
                         active_emps = []
                         for emp in role_emps:
-                            # 1. NEW JOINER BLOCKER: Do not roster if they haven't joined yet
                             emp_doj = emp_state[emp]['DOJ']
                             if emp_doj and day < emp_doj:
                                 emp_state[emp]['Schedule'][day] = 'Not Joined'
@@ -176,7 +174,7 @@ if uploaded_file is not None:
                                 active_emps.append(emp)
                                 
                         total_active = len(active_emps)
-                        if total_active == 0: continue # Skip if no one is active today
+                        if total_active == 0: continue 
                         
                         must_wo = []
                         total_wos_remaining_for_role = sum([emp_state[e]['WOs_Remaining'] for e in active_emps])
@@ -194,12 +192,16 @@ if uploaded_file is not None:
                         else:
                             dynamic_wo_target = max(min_wo, min(target_run_rate, max_wo))
 
+                        # THE ESCAPE HATCH FIX (V18)
                         for emp in active_emps:
                             state = emp_state[emp]
                             if state['WOs_Remaining'] > 0:
                                 if state['WOs_Remaining'] >= days_left: 
                                     must_wo.append(emp)
                                 elif state['Current_Streak'] >= 9: 
+                                    must_wo.append(emp)
+                                # NEW: Break the Night Lock if they hit their absolute max cap
+                                elif state['Lock_State'] == 'N' and state['Night_Count'] >= state['Max_Nights']:
                                     must_wo.append(emp)
                                 
                         assigned_wos = must_wo.copy()
