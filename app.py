@@ -8,33 +8,27 @@ import io
 # ==========================================
 # 1. APP UI DESIGN
 # ==========================================
-st.set_page_config(page_title="Putaway Roster Generator", page_icon="📅", layout="centered")
+st.set_page_config(page_title="Returns Roster Generator", page_icon="🔄", layout="centered")
 
-st.title("📅 Automated Putaway Roster")
-st.markdown("""
-Welcome! Upload your populated **Putaway_Roster.xlsx** file below. 
-The system will automatically calculate optimal WOs, balance Day/Night shifts, and enforce all operational constraints.
-""")
+st.title("🔄 Automated Returns Roster")
+st.markdown("Upload your standardized **Returns_Roster.xlsx** template below to generate the monthly schedule.")
 
-st.divider()
-
-# File Uploader
 uploaded_file = st.file_uploader("Upload Input Excel File (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
     if st.button("🚀 Generate Roster", use_container_width=True):
-        with st.spinner("Crunching the numbers and balancing shifts... Please wait."):
+        with st.spinner("Crunching numbers and balancing shifts within 33-40% limits... Please wait."):
             try:
                 # ==========================================
-                # 2. LOAD DATA FROM UPLOAD
+                # 2. LOAD STANDARDIZED DATA
                 # ==========================================
-                df_may = pd.read_excel(uploaded_file, sheet_name='May_Attendance')
-                df_targets = pd.read_excel(uploaded_file, sheet_name='June_Daily_Targets')
-                df_leaves = pd.read_excel(uploaded_file, sheet_name='June_Planned_Leaves')
-                df_emp = pd.read_excel(uploaded_file, sheet_name='June_Employee_Master')
+                df_prev = pd.read_excel(uploaded_file, sheet_name='Previous_Month_Attendance')
+                df_targets = pd.read_excel(uploaded_file, sheet_name='Daily_Targets')
+                df_leaves = pd.read_excel(uploaded_file, sheet_name='Planned_Leaves')
+                df_emp = pd.read_excel(uploaded_file, sheet_name='Employee_Master')
 
                 try:
-                    df_prefs = pd.read_excel(uploaded_file, sheet_name='June_Night_Preferences')
+                    df_prefs = pd.read_excel(uploaded_file, sheet_name='Night_Preferences')
                     df_prefs['Emp_ID'] = df_prefs['Emp_ID'].astype(str).str.strip()
                     df_prefs = df_prefs.drop_duplicates(subset=['Emp_ID'], keep='last')
                     pref_dict = df_prefs.set_index('Emp_ID')['Night_Shift_Pref'].to_dict()
@@ -44,28 +38,33 @@ if uploaded_file is not None:
                 df_emp['Role'] = df_emp['Role'].astype(str).str.strip()
                 df_targets['Role'] = df_targets['Role'].astype(str).str.strip()
                 df_emp['Emp_ID'] = df_emp['Emp_ID'].astype(str).str.strip()
-                df_may['Emp_ID'] = df_may['Emp_ID'].astype(str).str.strip()
+                df_prev['Emp_ID'] = df_prev['Emp_ID'].astype(str).str.strip()
 
                 df_targets['Date'] = pd.to_datetime(df_targets['Date'])
                 df_leaves['Date'] = pd.to_datetime(df_leaves['Date'])
-                days_in_june = pd.date_range(start='2026-06-01', end='2026-06-30')
+                
+                roster_start = df_targets['Date'].min()
+                roster_end = df_targets['Date'].max()
+                roster_days = pd.date_range(start=roster_start, end=roster_end)
 
                 # ==========================================
-                # 3. INITIALIZE EMPLOYEES
+                # 3. INITIALIZE EMPLOYEES 
                 # ==========================================
                 emp_state = {}
-                may_date_cols = [f"{d}-May" for d in range(1, 32)]
+                
+                exclude_cols = ['Emp_ID', 'Role', 'Name', 'NAME', 'Gender']
+                prev_date_cols = [c for c in df_prev.columns if c not in exclude_cols]
 
                 for _, row in df_emp.iterrows():
                     emp_id = row['Emp_ID']
-                    may_data = df_may[df_may['Emp_ID'] == emp_id]
+                    prev_data = df_prev[df_prev['Emp_ID'] == emp_id]
                     
                     target_wos = 4
                     if pd.notna(row['Date_of_Joining']):
                         try:
                             doj = pd.to_datetime(row['Date_of_Joining'])
-                            if doj >= pd.to_datetime('2026-06-01'):
-                                active_days = max(0, (pd.to_datetime('2026-06-30') - doj).days + 1)
+                            if doj >= roster_start:
+                                active_days = max(0, (roster_end - doj).days + 1)
                                 target_wos = active_days // 6
                         except:
                             pass 
@@ -73,11 +72,11 @@ if uploaded_file is not None:
                     last_shift_state = 'FREE' 
                     streak = 0
                     
-                    if not may_data.empty:
-                        may_row = may_data.iloc[0]
-                        for d in reversed(may_date_cols):
-                            if d not in may_row: continue
-                            val = str(may_row[d]).strip().upper()
+                    if not prev_data.empty:
+                        prev_row = prev_data.iloc[0]
+                        for d in reversed(prev_date_cols):
+                            if d not in prev_row: continue
+                            val = str(prev_row[d]).strip().upper()
                             
                             if val in ['P-M', 'P-E', 'P-D', 'E', 'M', 'D']:
                                 if streak == 0: last_shift_state = 'D'
@@ -91,17 +90,30 @@ if uploaded_file is not None:
                                 
                     min_n = 0
                     max_n = 20
+                    is_default = True
+                    
                     if row['Gender'] == 'Male':
-                        pref_str = str(pref_dict.get(emp_id, '')).strip()
+                        pref_val = pref_dict.get(emp_id, '')
+                        
+                        if isinstance(pref_val, datetime):
+                            pref_str = "20-26"
+                        else:
+                            pref_str = str(pref_val).strip()
+                            
+                        if '2026' in pref_str or 'Jul' in pref_str:
+                            pref_str = "20-26"
+
                         if '-' in pref_str:
                             try:
                                 parts = pref_str.split('-')
                                 min_n = int(parts[0])
                                 max_n = int(parts[1])
+                                is_default = False
                             except:
                                 pass
                     else:
                         max_n = 0 
+                        is_default = False 
 
                     emp_state[emp_id] = {
                         'Role': row['Role'],
@@ -112,17 +124,18 @@ if uploaded_file is not None:
                         'Night_Count': 0, 
                         'Min_Nights': min_n,
                         'Max_Nights': max_n,
+                        'Is_Default_Pref': is_default,
                         'Lock_State': last_shift_state,
                         'Schedule': {}
                     }
 
                 # ==========================================
-                # 4. ROSTER GENERATION LOGIC (V9 Engine)
+                # 4. ROSTER GENERATION LOGIC 
                 # ==========================================
                 roles = df_emp['Role'].unique()
 
-                for day in days_in_june:
-                    days_left = (pd.to_datetime('2026-06-30') - day).days + 1
+                for day in roster_days:
+                    days_left = (roster_end - day).days + 1
                     
                     for role in roles:
                         role_emps = [e for e, data in emp_state.items() if data['Role'] == role]
@@ -165,28 +178,32 @@ if uploaded_file is not None:
                                     must_wo.append(emp)
                                 elif state['Current_Streak'] >= 9: 
                                     must_wo.append(emp)
-                                elif state['Lock_State'] == 'N' and state['Night_Count'] >= state['Max_Nights']: 
-                                    must_wo.append(emp)
                                 
                         assigned_wos = must_wo.copy()
                         
                         if not is_zero_wo and len(assigned_wos) < dynamic_wo_target:
                             planned_mp_est = total_active - dynamic_wo_target
-                            target_n_est = round(planned_mp_est * 0.48)
-                            target_d_est = planned_mp_est - target_n_est
+                            
+                            # RETURNS DEPT: 33-40% Night target affects WO balancing logic
+                            target_n_est_max = math.floor(planned_mp_est * 0.40)
+                            target_d_est_max = math.floor(planned_mp_est * 0.67) 
                             
                             rem_active = [e for e in active_emps if e not in assigned_wos]
                             curr_locked_n = len([e for e in rem_active if emp_state[e]['Lock_State'] == 'N'])
                             curr_locked_d = len([e for e in rem_active if emp_state[e]['Lock_State'] == 'D'])
                             
-                            surplus_n = curr_locked_n - target_n_est
-                            surplus_d = curr_locked_d - target_d_est
+                            surplus_n = curr_locked_n - target_n_est_max
+                            surplus_d = curr_locked_d - target_d_est_max
 
                             candidates = []
                             for e in rem_active:
-                                if emp_state[e]['WOs_Remaining'] > 0:
-                                    if emp_state[e]['Lock_State'] == 'N' and emp_state[e]['WOs_Remaining'] == 1:
+                                state = emp_state[e]
+                                if state['WOs_Remaining'] > 0:
+                                    if state['Lock_State'] == 'N' and state['WOs_Remaining'] == 1:
                                         continue 
+                                    if (days_left - 1) > (state['WOs_Remaining'] - 1) * 10 + 9:
+                                        continue
+
                                     candidates.append(e)
                                     
                             def wo_sort_key(x):
@@ -218,7 +235,9 @@ if uploaded_file is not None:
                                 working_emps.append(emp)
                                 
                         planned_mp = len(working_emps)
-                        target_n = round(planned_mp * 0.48) 
+                        
+                        # RETURNS DEPT: Shift assignment limits (33% to 40%)
+                        max_target_n = math.floor(planned_mp * 0.40)
                         
                         locked_n = [e for e in working_emps if emp_state[e]['Lock_State'] == 'N']
                         locked_d = [e for e in working_emps if emp_state[e]['Lock_State'] == 'D']
@@ -233,7 +252,7 @@ if uploaded_file is not None:
                             emp_state[emp]['Schedule'][day] = 'D'
                             emp_state[emp]['Current_Streak'] += 1
                             
-                        shortfall_n = max(0, target_n - len(locked_n))
+                        curr_n = len(locked_n)
                         
                         eligible_free_males = []
                         for e in free_pool:
@@ -249,14 +268,20 @@ if uploaded_file is not None:
                             emp_state[x]['Night_Count']
                         ))
                         
-                        assigned_free_n = 0
+                        final_n_picks = []
+                        
+                        # Fill strictly up to the limit
+                        for emp in eligible_free_males:
+                            if curr_n < max_target_n:
+                                final_n_picks.append(emp)
+                                curr_n += 1
+
                         for emp in free_pool:
-                            if assigned_free_n < shortfall_n and emp in eligible_free_males:
+                            if emp in final_n_picks:
                                 emp_state[emp]['Schedule'][day] = 'N'
                                 emp_state[emp]['Night_Count'] += 1
                                 emp_state[emp]['Current_Streak'] += 1
                                 emp_state[emp]['Lock_State'] = 'N' 
-                                assigned_free_n += 1
                             else:
                                 emp_state[emp]['Schedule'][day] = 'D'
                                 emp_state[emp]['Current_Streak'] += 1
@@ -268,10 +293,10 @@ if uploaded_file is not None:
                 output_data = []
                 for emp_id, data in emp_state.items():
                     row_dict = {'Emp_ID': emp_id, 'Role': data['Role']}
-                    for day in days_in_june:
+                    for day in roster_days:
                         row_dict[day.strftime('%d-%b')] = data['Schedule'].get(day, '')
                     
-                    row_dict['Total_June_WOs'] = data['Starting_WOs'] - data['WOs_Remaining']
+                    row_dict['Total_WOs_Assigned'] = data['Starting_WOs'] - data['WOs_Remaining']
                     row_dict['Total_Night_Shifts'] = data['Night_Count']
                     row_dict['Target_Pref_Range'] = f"{data['Min_Nights']}-{data['Max_Nights']}" if data['Gender'] == 'Male' else "N/A"
                     
@@ -279,21 +304,22 @@ if uploaded_file is not None:
 
                 final_df = pd.DataFrame(output_data).sort_values('Role')
                 
-                # Write to Memory (Hidden from User)
                 output_buffer = io.BytesIO()
                 with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
                     final_df.to_excel(writer, index=False, sheet_name='Generated_Roster')
                 
-                st.success("✅ Roster successfully generated!")
+                month_name = roster_start.strftime('%B_%Y')
+                out_filename = f"{month_name}_Returns_Roster.xlsx"
+
+                st.success(f"✅ {month_name.replace('_', ' ')} Returns Roster successfully generated!")
                 
-                # Download Button
                 st.download_button(
-                    label="⬇️ Download Final Roster (.xlsx)",
+                    label="⬇️ Download Returns Roster (.xlsx)",
                     data=output_buffer.getvalue(),
-                    file_name="June_Final_Roster_Output.xlsx",
+                    file_name=out_filename,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
 
             except Exception as e:
-                st.error(f"⚠️ An error occurred. Please check your Excel formatting: {e}")
+                st.error(f"⚠️ An error occurred: {e}")
