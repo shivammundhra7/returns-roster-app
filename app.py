@@ -4,6 +4,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import math
 import io
+import re
 
 # ==========================================
 # 1. APP UI DESIGN
@@ -11,13 +12,13 @@ import io
 st.set_page_config(page_title="Putaway Roster Generator", page_icon="📅", layout="centered")
 
 st.title("📅 Automated Putaway Roster")
-st.markdown("Upload your standardized **Putaway_Roster.xlsx** template below.\n*Includes strict max-nights escape hatches, 45-50% flexibility, & Exp/New MP balancing.*")
+st.markdown("Upload your standardized **Putaway_Roster.xlsx** template below.\n*Includes 45-48% Night limits, Load-Based 10-16% WOs, & Advanced Preference Parsing.*")
 
 uploaded_file = st.file_uploader("Upload Input Excel File (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
     if st.button("🚀 Generate Roster", use_container_width=True):
-        with st.spinner("Balancing Experience ratios & enforcing strict night escape hatches... Please wait."):
+        with st.spinner("Balancing Load-Based WOs & enforcing strict night limits... Please wait."):
             try:
                 # ==========================================
                 # 2. LOAD STANDARDIZED DATA
@@ -48,7 +49,7 @@ if uploaded_file is not None:
                 roster_days = pd.date_range(start=roster_start, end=roster_end)
 
                 # ==========================================
-                # 3. INITIALIZE EMPLOYEES
+                # 3. INITIALIZE EMPLOYEES (V16 - Advanced Parsing)
                 # ==========================================
                 emp_state = {}
                 
@@ -102,23 +103,26 @@ if uploaded_file is not None:
                     
                     if row['Gender'] == 'Male':
                         pref_val = pref_dict.get(emp_id, '')
+                        # Reverse-engineer Excel Date Glitch using Regex
+                        nums = []
+                        for x in re.findall(r'\d+', str(pref_val)):
+                            num_val = int(x)
+                            nums.append(num_val)
+                            if num_val >= 2000:
+                                nums.append(num_val % 100) # Extract '18' from '2018'
+                                
+                        valid_nums = [n for n in nums if 0 <= n <= 31]
+                        valid_nums = list(set(valid_nums))
+                        valid_nums.sort()
                         
-                        if isinstance(pref_val, datetime):
-                            pref_str = "20-26"
-                        else:
-                            pref_str = str(pref_val).strip()
-                            
-                        if '2026' in pref_str or 'Jul' in pref_str:
-                            pref_str = "20-26"
-
-                        if '-' in pref_str:
-                            try:
-                                parts = pref_str.split('-')
-                                min_n = int(parts[0])
-                                max_n = int(parts[1])
-                                is_default = False
-                            except:
-                                pass
+                        if len(valid_nums) >= 2:
+                            min_n = valid_nums[-2]
+                            max_n = valid_nums[-1]
+                            is_default = False
+                        elif len(valid_nums) == 1:
+                            min_n = valid_nums[0]
+                            max_n = valid_nums[0]
+                            is_default = False
                     else:
                         max_n = 0 
                         is_default = False 
@@ -171,23 +175,29 @@ if uploaded_file is not None:
                         total_active = len(active_emps)
                         if total_active == 0: continue
                         
-                        must_wo = []
-                        total_wos_remaining_for_role = sum([emp_state[e]['WOs_Remaining'] for e in active_emps])
-                        
-                        if days_left > 0:
-                            target_run_rate = math.ceil(total_wos_remaining_for_role / days_left)
-                        else:
-                            target_run_rate = total_wos_remaining_for_role
-
-                        min_wo = int(total_active * 0.08)
-                        max_wo = max(1, math.ceil(total_active * 0.17)) 
+                        # V16: LOAD-BASED WO BALANCING (10% - 16%)
+                        target_cols = [c for c in target_row.columns if c not in ['Date', 'Role', 'Zero_WO_Day', 'Morning_Pct']]
+                        load_ratio = 1.0
+                        if target_cols:
+                            col = target_cols[0]
+                            try:
+                                today_load = float(target_row.iloc[0][col])
+                                avg_load = float(df_targets[df_targets['Role'] == role][col].mean())
+                                if today_load > 0 and avg_load > 0:
+                                    load_ratio = avg_load / today_load
+                            except:
+                                pass
+                                
+                        base_wo_target = total_active * 0.13 * load_ratio
+                        min_wo = math.floor(total_active * 0.10)
+                        max_wo = math.ceil(total_active * 0.16)
                         
                         if is_zero_wo:
                             dynamic_wo_target = 0
                         else:
-                            dynamic_wo_target = max(min_wo, min(target_run_rate, max_wo))
+                            dynamic_wo_target = max(min_wo, min(int(base_wo_target), max_wo))
 
-                        # THE ESCAPE HATCH (V15 FIX)
+                        must_wo = []
                         for emp in active_emps:
                             state = emp_state[emp]
                             if state['WOs_Remaining'] > 0:
@@ -195,7 +205,7 @@ if uploaded_file is not None:
                                     must_wo.append(emp)
                                 elif state['Current_Streak'] >= 9: 
                                     must_wo.append(emp)
-                                # Break the Night Lock if they hit their absolute max cap
+                                # Escape Hatch
                                 elif state['Lock_State'] == 'N' and state['Night_Count'] >= state['Max_Nights']:
                                     must_wo.append(emp)
                                 
@@ -204,8 +214,8 @@ if uploaded_file is not None:
                         if not is_zero_wo and len(assigned_wos) < dynamic_wo_target:
                             planned_mp_est = total_active - dynamic_wo_target
                             
-                            # Targeting the flexible 45-50% / 50-55% split boundaries
-                            target_n_est_max = math.floor(planned_mp_est * 0.50)
+                            # V16: 45-48% Night / 52-55% Day Bounds
+                            target_n_est_max = math.floor(planned_mp_est * 0.48)
                             target_d_est_max = math.floor(planned_mp_est * 0.55)
                             
                             rem_active = [e for e in active_emps if e not in assigned_wos]
@@ -256,7 +266,7 @@ if uploaded_file is not None:
                         planned_mp = len(working_emps)
                         if planned_mp == 0: continue
                         
-                        max_target_n = math.floor(planned_mp * 0.50)
+                        max_target_n = math.floor(planned_mp * 0.48)
                         
                         locked_n = [e for e in working_emps if emp_state[e]['Lock_State'] == 'N']
                         locked_d = [e for e in working_emps if emp_state[e]['Lock_State'] == 'D']
@@ -303,8 +313,11 @@ if uploaded_file is not None:
                         eligible_exp = [e for e in eligible_free_males if not emp_state[e]['Is_New']]
                         eligible_new = [e for e in eligible_free_males if emp_state[e]['Is_New']]
                         
+                        # V16: STARVATION FIX - Prioritize men with the most Runway left
                         def pref_sort(x):
-                            return (-(max(0, emp_state[x]['Min_Nights'] - emp_state[x]['Night_Count'])), emp_state[x]['Night_Count'])
+                            need_min = max(0, emp_state[x]['Min_Nights'] - emp_state[x]['Night_Count'])
+                            runway = emp_state[x]['Max_Nights'] - emp_state[x]['Night_Count']
+                            return (-need_min, -runway)
                             
                         eligible_exp.sort(key=pref_sort)
                         eligible_new.sort(key=pref_sort)
