@@ -60,6 +60,7 @@ WO_LO,    WO_HI    = 0.08, 0.16   # week-off share of ACTIVE staff, per role per
 # --- Day-of-week and per-role week-off tweaks ---
 SUNDAY_WO_BUMP = 0.03             # extra WO fraction on Sundays (added to target, still clamped to 8-16%)
 FLAT_WO_ROLES  = {"RSTO Putter"}  # roles whose WOs spread evenly across the month, ignoring daily load
+DAY_ONLY_ROLES = {"RSTO Putter"}  # roles worked only during the day: never assign nights, no night split
 
 # --- Soft-constraint weights (relative priority). Higher = the solver tries harder. ---
 # Read in "cost per person misplaced". Night-staff is scaled (x100) internally, so its
@@ -307,7 +308,9 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 gender = row["Gender"]
                 doj = row["DOJ"] if pd.notna(row["DOJ"]) else None
                 mn, mx, is_def = get_band(eid, gender)
-                eligible = (gender == "Male") and (mx > 0)
+                eligible = (gender == "Male") and (mx > 0) and (row["Role"] not in DAY_ONLY_ROLES)
+                if not eligible:
+                    mn, mx = 0, 0          # can't work nights -> no night-preference penalty
 
                 # schedulable day indices = joined and not on leave
                 sched = []
@@ -338,6 +341,10 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                     entitlement=entitlement, june_tail=june_tail,
                     prev_last_working=prev_last_working, prev_shift=prev_shift,
                 )
+
+            # Roles that actually have night-eligible staff. Day-only roles (e.g. RSTO Putter)
+            # are excluded, so the night split is neither enforced nor reported for them.
+            night_roles = {r for r in roles if any(e["eligible"] and e["role"] == r for e in emp.values())}
 
             # ==========================================================
             # 4. BUILD THE CP-SAT MODEL
@@ -418,6 +425,9 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 for r in roles:
                     members = sched_by_day_role[(i, r)]
                     if not members:
+                        continue
+                    # Day-only roles (no night-eligible staff that day) have no night split.
+                    if not any(emp[m]["eligible"] for m in members):
                         continue
                     Wexpr = sum(WV(m, i) for m in members)        # working count (variable)
                     Nexpr = sum(NV(m, i) for m in members)        # night count (variable)
@@ -537,7 +547,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                     wos += (c == "WOD")
                 rec["Total_WOs"] = wos
                 rec["Total_Nights"] = nights
-                rec["Pref_Band"] = f"{e['mn']}-{e['mx']}" if e["gender"] == "Male" else "Day only"
+                rec["Pref_Band"] = f"{e['mn']}-{e['mx']}" if e["eligible"] else "Day only"
                 rows.append(rec)
             roster_df = pd.DataFrame(rows).sort_values(["Role", "Emp_ID"]).reset_index(drop=True)
 
@@ -557,7 +567,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                         "Date": d.strftime("%d-%b"), "Role": r, "Active": active,
                         "Working": work, "Day": work - nig, "Night": nig,
                         "Night_%": round(100 * nig / work, 1) if work else 0,
-                        "Night_target": f"{NLO_PCT}-{NHI_PCT}%",
+                        "Night_target": f"{NLO_PCT}-{NHI_PCT}%" if r in night_roles else "Day only",
                         "WeekOffs": woc,
                         "WO_%": round(100 * woc / active, 1) if active else 0,
                         "WO_target_%": round(100 * wo_target_frac(d, r), 1),
@@ -579,7 +589,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                                    "Detail": f"got {tot} nights, above preferred maximum {e['mx']} "
                                              f"(over {tot - e['mx']}) — likely needed to staff the floor"})
             for _, s in summary_df.iterrows():
-                if s["Working"] and not (NLO_PCT <= s["Night_%"] <= NHI_PCT):
+                if s["Role"] in night_roles and s["Working"] and not (NLO_PCT <= s["Night_%"] <= NHI_PCT):
                     report.append({"Type": "Night split", "Who": f"{s['Date']} / {s['Role']}",
                                    "Detail": f"nights at {s['Night_%']}% of {int(s['Working'])} working "
                                              f"(target {NLO_PCT}-{NHI_PCT}%)"})
@@ -608,7 +618,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             c1, c2, c3 = st.columns(3)
             outside_night = sum(
                 1 for _, s in summary_df.iterrows()
-                if s["Working"] and not (NLO_PCT <= s["Night_%"] <= NHI_PCT)
+                if s["Role"] in night_roles and s["Working"] and not (NLO_PCT <= s["Night_%"] <= NHI_PCT)
             )
             pref_viol = sum(
                 1 for eid, e in emp.items() if e["gender"] == "Male"
