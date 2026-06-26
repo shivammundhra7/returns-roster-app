@@ -54,7 +54,7 @@ ENFORCE_SHIFT_BLOCKS = True    # ASSUMPTION: no Day<->Night switch without a WO/
 ALLOW_WO_FLEX        = 0       # 0 = exact monthly WO count per person; 1 = allow +/-1
 
 # --- Target percentages ---
-NIGHT_LO, NIGHT_HI = 0.47, 0.49   # night share of WORKING staff, per role per day
+NIGHT_LO, NIGHT_HI = 0.48, 0.50   # night share of WORKING staff, per role per day
 WO_LO,    WO_HI    = 0.08, 0.16   # week-off share of ACTIVE staff, per role per day
 
 # --- Day-of-week and per-role week-off tweaks ---
