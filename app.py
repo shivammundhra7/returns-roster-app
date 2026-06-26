@@ -173,9 +173,33 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             except Exception:
                 df_prefs = pd.DataFrame(columns=["Emp_ID"])
 
+            # Normalise headers: strip whitespace on every column name, and accept
+            # common aliases ("Job Role", etc.) as the canonical "Role".
+            ROLE_ALIASES = {"job role", "jobrole", "role", "department", "dept"}
             for df in (df_emp, df_prev, df_targets, df_leaves, df_prefs):
+                df.columns = [str(c).strip() for c in df.columns]
+                if "Role" not in df.columns:
+                    for c in list(df.columns):
+                        if c.strip().lower() in ROLE_ALIASES:
+                            df.rename(columns={c: "Role"}, inplace=True)
+                            break
                 if "Emp_ID" in df.columns:
                     df["Emp_ID"] = df["Emp_ID"].astype(str).str.strip()
+
+            # Clear, friendly errors if a required column is still missing.
+            if "Role" not in df_emp.columns:
+                st.error(
+                    "Employee_Master has no 'Role' column. Columns found: "
+                    f"{list(df_emp.columns)}. Rename the role column to 'Role' (or 'Job Role'), "
+                    "and check there is no title row sitting above the header row."
+                )
+                st.stop()
+            if "Role" not in df_targets.columns:
+                st.error(
+                    "Daily_Targets has no 'Role' column. Columns found: "
+                    f"{list(df_targets.columns)}. Rename the role column to 'Role'."
+                )
+                st.stop()
 
             df_emp["Role"]     = df_emp["Role"].astype(str).str.strip()
             df_targets["Role"] = df_targets["Role"].astype(str).str.strip()
