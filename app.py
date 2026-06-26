@@ -11,7 +11,7 @@ WHAT CHANGED vs the old code
     commas are handled, and night preferences read clean Min/Max columns if present.
 
 HOW THE THREE GOALS ARE MODELLED
-  1. Night split 47-49%  -> top-weighted soft target, per role per day (a FLOOR and a ceiling).
+  1. Night split 48-50%  -> top-weighted soft target, per role per day (a FLOOR and a ceiling).
   2. Night preference     -> per-person monthly band, weighted BELOW staffing (worst-case only).
   3. Load-weighted WOs    -> per day per role, week-offs kept in 8-16% of active, with the
                              target inside that band interpolated from the day's load
