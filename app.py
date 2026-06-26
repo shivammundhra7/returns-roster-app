@@ -11,7 +11,7 @@ WHAT CHANGED vs the old code
     commas are handled, and night preferences read clean Min/Max columns if present.
 
 HOW THE THREE GOALS ARE MODELLED
-  1. Night split 48-50%  -> top-weighted soft target, per role per day (a FLOOR and a ceiling).
+  1. Night split 47-49%  -> top-weighted soft target, per role per day (a FLOOR and a ceiling).
   2. Night preference     -> per-person monthly band, weighted BELOW staffing (worst-case only).
   3. Load-weighted WOs    -> per day per role, week-offs kept in 8-16% of active, with the
                              target inside that band interpolated from the day's load
@@ -25,6 +25,7 @@ Run with:
 import io
 import re
 import math
+from datetime import datetime, date
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -54,7 +55,7 @@ ENFORCE_SHIFT_BLOCKS = True    # ASSUMPTION: no Day<->Night switch without a WO/
 ALLOW_WO_FLEX        = 0       # 0 = exact monthly WO count per person; 1 = allow +/-1
 
 # --- Target percentages ---
-NIGHT_LO, NIGHT_HI = 0.48, 0.50   # night share of WORKING staff, per role per day
+NIGHT_LO, NIGHT_HI = 0.47, 0.49   # night share of WORKING staff, per role per day
 WO_LO,    WO_HI    = 0.08, 0.16   # week-off share of ACTIVE staff, per role per day
 
 # --- Day-of-week and per-role week-off tweaks ---
@@ -70,6 +71,11 @@ W_WO_RANGE    = 1000    # per person outside the 8-16% WO band            (top p
 W_PREF        = 200     # per night a person is outside their band        (below staffing)
 W_STREAK      = 25      # per working day beyond the 6th in a 7-day run   (nudge WO by day 6-7)
 W_WO_LOAD     = 4       # per person/day from the load-weighted WO target (gentle shaping)
+
+# --- Split nights for light-night staff (avoid long back-to-back night blocks) ---
+SPLIT_NIGHTS_BAND_MAX = 12  # apply to people whose night band tops out at <= this
+MAX_NIGHT_RUN         = 3   # soft cap on consecutive nights for those people (the dial to tune)
+W_NIGHT_RUN           = 30  # per night beyond the run cap (gentle; never changes night totals)
 
 PREF_DEFAULT_MAX  = 20  # night ceiling for a male with no stated preference
 SOLVER_TIME_LIMIT = 120 # seconds
@@ -124,17 +130,31 @@ def classify(val):
     return "D"
 
 
-def parse_band_string(text):
-    """'21-26' -> (21, 26). Defends against Excel turning it into a date."""
-    nums = []
-    for x in re.findall(r"\d+", str(text)):
-        v = int(x)
-        nums.append(v)
-        if v >= 2000:                 # Excel mangled "21-26" into a year; recover the day part
-            nums.append(v % 100)
-    nums = sorted({n for n in nums if 0 <= n <= 31})
+def parse_band_value(val):
+    """Recover (min_nights, max_nights) from a night-preference cell.
+
+    Handles plain text like '7-12' or '21-26', AND the common Excel glitch where a
+    value like '7-12' is silently stored as the date 12-July. In that date, the month
+    and the day ARE the two numbers the user typed (month 7, day 12 -> band 7-12), so
+    we rebuild from .month and .day and ignore the year/time entirely.
+    """
+    if val is None:
+        return None
+    if isinstance(val, float) and math.isnan(val):
+        return None
+
+    # Case 1: Excel turned 'M-N' into a real date -> month & day are the intended numbers.
+    if isinstance(val, (pd.Timestamp, datetime, date)):
+        lo, hi = sorted((int(val.month), int(val.day)))
+        if 0 <= lo <= 31 and 0 <= hi <= 31:
+            return lo, hi
+        return None
+
+    # Case 2: plain text or number. Keep only 0-31 values, then take the first two in order.
+    nums = [int(x) for x in re.findall(r"\d+", str(val))]
+    nums = [n for n in nums if 0 <= n <= 31]
     if len(nums) >= 2:
-        return nums[0], nums[-1]
+        return min(nums[0], nums[1]), max(nums[0], nums[1])
     if len(nums) == 1:
         return nums[0], nums[0]
     return None
@@ -283,7 +303,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                     except (ValueError, TypeError):
                         pass
                 if emp_id in pref_str:
-                    parsed = parse_band_string(pref_str[emp_id])
+                    parsed = parse_band_value(pref_str[emp_id])
                     if parsed:
                         return parsed[0], parsed[1], False
                 return 0, PREF_DEFAULT_MAX, True
@@ -491,6 +511,24 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                         model.Add(sv >= sum(exprs) + const - 6)
                         obj_streak.append(sv)
 
+            # ---- SOFT: split nights for light-night staff (band max <= SPLIT_NIGHTS_BAND_MAX) ----
+            # Penalise any run of more than MAX_NIGHT_RUN consecutive night shifts so their
+            # nights are spread across the month rather than kept in one long block. A rest day
+            # or a day shift breaks the run. Heavy-night staff are not affected.
+            obj_night_run = []
+            WN = MAX_NIGHT_RUN + 1
+            for eid, e in emp.items():
+                if (not e["eligible"]) or e["mx"] == 0 or e["mx"] > SPLIT_NIGHTS_BAND_MAX:
+                    continue
+                sched = e["sched"]
+                for s in range(0, len(sched) - WN + 1):
+                    window = sched[s:s + WN]
+                    if window[-1] - window[0] == WN - 1:        # calendar-consecutive days only
+                        run = sum(NV(eid, i) for i in window)
+                        sv = model.NewIntVar(0, WN, f"nr_{eid}_{s}")
+                        model.Add(sv >= run - MAX_NIGHT_RUN)
+                        obj_night_run.append(sv)
+
             # ---- OBJECTIVE ----
             model.Minimize(
                 W_NIGHT_STAFF * sum(obj_night)
@@ -498,6 +536,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 + W_PREF * sum(obj_pref)
                 + W_STREAK * sum(obj_streak)
                 + W_WO_LOAD * sum(obj_wo_load)
+                + W_NIGHT_RUN * sum(obj_night_run)
             )
 
             # ==========================================================
