@@ -57,6 +57,10 @@ ALLOW_WO_FLEX        = 0       # 0 = exact monthly WO count per person; 1 = allo
 NIGHT_LO, NIGHT_HI = 0.47, 0.49   # night share of WORKING staff, per role per day
 WO_LO,    WO_HI    = 0.08, 0.16   # week-off share of ACTIVE staff, per role per day
 
+# --- Day-of-week and per-role week-off tweaks ---
+SUNDAY_WO_BUMP = 0.03             # extra WO fraction on Sundays (added to target, still clamped to 8-16%)
+FLAT_WO_ROLES  = {"RSTO Putter"}  # roles whose WOs spread evenly across the month, ignoring daily load
+
 # --- Soft-constraint weights (relative priority). Higher = the solver tries harder. ---
 # Read in "cost per person misplaced". Night-staff is scaled (x100) internally, so its
 # raw weight looks small but is comparable to the others per person.
@@ -210,12 +214,23 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             loads = [load_by_date[d] for d in days if not math.isnan(load_by_date[d])]
             lmin, lmax = (min(loads), max(loads)) if loads else (0.0, 0.0)
 
-            def wo_target_frac(d):
-                ld = load_by_date[d]
-                if lmax == lmin or math.isnan(ld):
-                    return (WO_LO + WO_HI) / 2.0
-                f = (ld - lmin) / (lmax - lmin)          # 0 at lowest load, 1 at highest
-                return WO_HI - (WO_HI - WO_LO) * f        # lowest load -> more offs (WO_HI)
+            avg_wo_frac = (WO_LO + WO_HI) / 2.0
+
+            def wo_target_frac(d, role=None):
+                # Flat-WO roles ignore load entirely: even spread across the month.
+                if role in FLAT_WO_ROLES:
+                    base = avg_wo_frac
+                else:
+                    ld = load_by_date[d]
+                    if lmax == lmin or math.isnan(ld):
+                        base = avg_wo_frac
+                    else:
+                        f = (ld - lmin) / (lmax - lmin)    # 0 at lowest load, 1 at highest
+                        base = WO_HI - (WO_HI - WO_LO) * f  # lowest load -> more offs (WO_HI)
+                    # Sundays run lighter than the sheet says -> push toward more offs.
+                    if d.weekday() == 6:                    # Monday=0 ... Sunday=6
+                        base += SUNDAY_WO_BUMP
+                return min(max(base, WO_LO), WO_HI)         # never leave the 8-16% band
 
             roles = sorted(df_emp["Role"].unique())
 
@@ -408,7 +423,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                     model.Add(u >= lo - woexpr)                  # below 8%
                     model.Add(o >= woexpr - hi)                  # above 16%
                     obj_wo_range += [u, o]
-                    tgt = int(round(wo_target_frac(d) * A))
+                    tgt = int(round(wo_target_frac(d, r) * A))
                     tgt = min(max(tgt, lo), hi)
                     dev = model.NewIntVar(0, A, f"wd_{i}_{r}")
                     model.Add(dev >= woexpr - tgt)
@@ -521,7 +536,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                         "Night_target": f"{NLO_PCT}-{NHI_PCT}%",
                         "WeekOffs": woc,
                         "WO_%": round(100 * woc / active, 1) if active else 0,
-                        "WO_target_%": round(100 * wo_target_frac(d), 1),
+                        "WO_target_%": round(100 * wo_target_frac(d, r), 1),
                     })
             summary_df = pd.DataFrame(summ)
 
