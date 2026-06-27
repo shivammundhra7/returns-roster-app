@@ -56,8 +56,7 @@ DEFAULTS = {
     "WO_HI":                0.16,
     "SUNDAY_WO_BUMP":       0.03,    # extra WO fraction on Sundays (still clamped to band)
     "PREF_DEFAULT_MAX":     20,      # night ceiling for a male with no stated preference
-    "SPLIT_NIGHTS_BAND_MAX":12,      # split nights for people whose band tops out at <= this
-    "MAX_NIGHT_RUN":        3,       # soft cap on consecutive nights for those people
+    "MAX_NIGHT_RUN":        6,       # longest night stretch before it's broken by a day stretch
     "W_NIGHT_STAFF":        12,      # weights (priority). Higher = solver tries harder.
     "W_WO_RANGE":           1000,
     "W_PREF":               200,
@@ -669,18 +668,26 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                         model.Add(sv >= sum(ex) + sum(v for t, v in w if t == "c") - 6)
                         obj_streak.append(sv)
 
-            # SOFT: split nights for light-night staff
-            WN = cfg["MAX_NIGHT_RUN"] + 1
+            # SOFT: break long NIGHT stretches with a DAY stretch (everyone who works nights).
+            # nphase[i] = consecutive nights up to day i. A DAY shift resets it to 0; a week-off
+            # CARRIES the count forward (a rest day alone is NOT a break). So the only way to end
+            # a long night stretch is to actually work a stretch of day shifts — which is the ask.
+            CAP = cfg["MAX_NIGHT_RUN"]
             for eid, e in emp.items():
-                if (not e["eligible"]) or e["mx"] == 0 or e["mx"] > cfg["SPLIT_NIGHTS_BAND_MAX"]:
+                if (not e["eligible"]) or e["mx"] <= CAP:     # can't exceed the cap -> nothing to split
                     continue
-                sc = e["sched"]
-                for s in range(0, len(sc) - WN + 1):
-                    win = sc[s:s + WN]
-                    if win[-1] - win[0] == WN - 1:
-                        sv = model.NewIntVar(0, WN, f"nr_{eid}_{s}")
-                        model.Add(sv >= sum(NV(eid, i) for i in win) - cfg["MAX_NIGHT_RUN"])
-                        obj_night_run.append(sv)
+                nphase = {}
+                L = len(e["sched"])
+                for i in e["sched"]:
+                    base = nphase[i - 1] if (i - 1) in e["sched_set"] else 0
+                    ph = model.NewIntVar(0, L, f"ph_{eid}_{i}")
+                    model.Add(ph == base + 1).OnlyEnforceIf(night_v[(eid, i)])
+                    model.Add(ph == 0).OnlyEnforceIf(day_v[(eid, i)])
+                    model.Add(ph == base).OnlyEnforceIf(wo_v[(eid, i)])
+                    nphase[i] = ph
+                    pe = model.NewIntVar(0, L, f"pe_{eid}_{i}")
+                    model.Add(pe >= ph - CAP)                  # penalise nights beyond the cap
+                    obj_night_run.append(pe)
 
             # SOFT (optional): cross-month cumulative night fairness — minimise spread of totals
             cum_nights = {}
