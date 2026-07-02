@@ -31,6 +31,7 @@ Run with:
 import io
 import re
 import math
+import warnings as pywarnings
 from datetime import datetime, date
 import pandas as pd
 import numpy as np
@@ -47,7 +48,7 @@ except Exception:
 # ======================================================================
 DEFAULTS = {
     "MAX_CONSEC_WORK_DAYS": 9,       # hard cap on consecutive working days
-    "WO_DAYS_PER_OFF":      7.0,     # ~1 week-off per N active days (7 -> 4 for a full month)
+    "WO_PER_MONTH":         4,       # week-offs for someone present the whole period (fixed, not scaled by period length)
     "ENFORCE_SHIFT_BLOCKS": True,    # no Day<->Night switch without a rest day between
     "ALLOW_WO_FLEX":        0,       # 0 = exact monthly WO count; 1 = allow +/-1
     "NIGHT_LO":             0.47,    # night share of WORKING staff, per role per day
@@ -88,9 +89,28 @@ ROLE_ALIASES = {"job role", "jobrole", "role", "department", "dept"}
 # SMALL HELPERS
 # ======================================================================
 def parse_dates(series, dayfirst=True):
-    out = pd.to_datetime(series, dayfirst=dayfirst, errors="coerce")
-    if out.isna().mean() > 0.5:
-        out = pd.to_datetime(series, dayfirst=not dayfirst, errors="coerce")
+    """Robust to mixed date formats in one column (e.g. '01-07-2026' and '7/22/2026').
+    Fast path assumes one format; if anything fails, infer per element, then fall back
+    to element-wise parsing that tries both day-first and month-first."""
+    with pywarnings.catch_warnings():
+        pywarnings.simplefilter("ignore")
+        out = pd.to_datetime(series, dayfirst=dayfirst, errors="coerce")
+        if out.isna().any():
+            try:
+                out = out.fillna(pd.to_datetime(series, format="mixed", dayfirst=dayfirst, errors="coerce"))
+            except Exception:
+                pass
+            if out.isna().any():
+                def _one(x):
+                    if pd.isna(x):
+                        return pd.NaT
+                    for df in (dayfirst, not dayfirst):
+                        try:
+                            return pd.Timestamp(pd.to_datetime(str(x).strip(), dayfirst=df))
+                        except Exception:
+                            continue
+                    return pd.NaT
+                out = out.fillna(series.map(_one))
     return out
 
 
@@ -374,6 +394,12 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
 
             df_emp["Role"] = df_emp["Role"].astype(str).str.strip()
             df_targets["Role"] = df_targets["Role"].astype(str).str.strip()
+            _raw_dates = df_targets["Date"].astype(str)
+            date_fmt_warn = None
+            if _raw_dates.str.contains("/").any() and _raw_dates.str.contains("-").any():
+                date_fmt_warn = ("Daily_Targets 'Date' column mixes '/' and '-' formats. It was parsed "
+                                 "safely, but please standardize to one day-first format "
+                                 "(e.g. 01-07-2026) so the roster period is never misread.")
             df_targets["Date"] = parse_dates(df_targets["Date"], dayfirst=True)
             df_targets = df_targets.dropna(subset=["Date"])
             df_targets["Daily_Load"] = df_targets["Daily_Load"].apply(clean_num)
@@ -491,7 +517,10 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 sched = [i for i, d in enumerate(days)
                          if ((doj is None) or (doj.normalize() <= d)) and d not in leave_by_emp.get(eid, set())]
                 active_days = sum(1 for d in days if (doj is None) or (doj.normalize() <= d))
-                entitlement = max(0, min(int(round(active_days / cfg["WO_DAYS_PER_OFF"])), len(sched)))
+                # Week-offs = the department's monthly figure, prorated by how much of the period
+                # the person is present. A full-period employee gets exactly WO_PER_MONTH, whether
+                # the period is 30, 31, or 35 days — period length never silently changes it.
+                entitlement = max(0, min(int(round(cfg["WO_PER_MONTH"] * active_days / num_days)), len(sched)))
 
                 june_work, prev_nights = [], 0
                 last_class = "NONE"
@@ -517,6 +546,8 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
 
             # ---------- validation ----------
             errors, warnings = validate(df_emp, df_targets, df_prev, df_prefs, df_leaves, days, emp)
+            if date_fmt_warn:
+                warnings.append(date_fmt_warn)
             if errors:
                 st.error("Cannot generate — fix these first:")
                 for e in errors:
@@ -899,7 +930,8 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             mode = ("fresh full solve" if not current else
                     (f"new-joiner build ({len(new_joiners)} new)" if freeze_date is None
                      else f"re-plan from {freeze_date.strftime('%d-%b')}"))
-            st.success(f"✅ {month_name.replace('_', ' ')} — {status_name} · mode: {mode}")
+            st.success(f"✅ {month_name.replace('_', ' ')} — {status_name} · mode: {mode} · "
+                       f"{num_days}-day period · {cfg['WO_PER_MONTH']} week-offs each (full period)")
 
             all_pass = all(c["Result"] == "PASS" for c in checks)
             if not all_pass:
