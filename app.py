@@ -125,22 +125,26 @@ def clean_num(x):
 
 
 def coerce_to(default, raw):
-    """Coerce a Config value to the type of its default."""
+    """Coerce a Config value to the type of its default. A blank value keeps the default,
+    so an empty cell never silently turns a setting off."""
     if raw is None or (isinstance(raw, float) and math.isnan(raw)):
         return default
+    s = str(raw).strip()
+    if s == "":                                        # blank cell -> keep the default
+        return default
     if isinstance(default, bool):                      # bool must be checked before int
-        return str(raw).strip().lower() in ("true", "1", "yes", "y", "t")
+        return s.lower() in ("true", "1", "yes", "y", "t")
     if isinstance(default, int):
         try:
-            return int(float(str(raw).replace(",", "").strip()))
+            return int(float(s.replace(",", "")))
         except ValueError:
             return default
     if isinstance(default, float):
         try:
-            return float(str(raw).replace(",", "").strip())
+            return float(s.replace(",", ""))
         except ValueError:
             return default
-    return str(raw).strip()
+    return s
 
 
 def parse_band_value(val):
@@ -886,6 +890,16 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             add_check("Day-only / female staff have no nights", not no_night_bad,
                       "" if not no_night_bad else f"violations: {set(no_night_bad)}")
 
+            if cfg["ENFORCE_SHIFT_BLOCKS"]:
+                flip_bad = []
+                for eid, e in emp.items():
+                    for i in range(num_days - 1):
+                        if i in e["sched_set"] and (i + 1) in e["sched_set"]:
+                            if {cell(eid, i), cell(eid, i + 1)} == {"D", "N"}:
+                                flip_bad.append((eid, day_labels[i]))
+                add_check("No Day/Night switch without a rest day", not flip_bad,
+                          "" if not flip_bad else f"flips at: {flip_bad[:6]}")
+
             lock_bad = []
             for eid in current:
                 if eid in emp:
@@ -930,8 +944,14 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             mode = ("fresh full solve" if not current else
                     (f"new-joiner build ({len(new_joiners)} new)" if freeze_date is None
                      else f"re-plan from {freeze_date.strftime('%d-%b')}"))
+            blocks_state = "ON" if cfg["ENFORCE_SHIFT_BLOCKS"] else "OFF"
             st.success(f"✅ {month_name.replace('_', ' ')} — {status_name} · mode: {mode} · "
-                       f"{num_days}-day period · {cfg['WO_PER_MONTH']} week-offs each (full period)")
+                       f"{num_days}-day period · {cfg['WO_PER_MONTH']} week-offs each · "
+                       f"Day↔Night blocks: {blocks_state}")
+            if not cfg["ENFORCE_SHIFT_BLOCKS"]:
+                st.warning("Day↔Night shift blocks are OFF, so shifts can switch without a rest day. "
+                           "To require a rest day between Day and Night, set ENFORCE_SHIFT_BLOCKS = TRUE "
+                           "in the Config sheet (or remove that row to use the default, which is ON).")
 
             all_pass = all(c["Result"] == "PASS" for c in checks)
             if not all_pass:
