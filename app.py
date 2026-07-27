@@ -65,7 +65,7 @@ DEFAULTS = {
     
     # Solver Config
     "SOLVER_TIME_LIMIT":    120,
-    "SOLVER_WORKERS":       8,
+    "SOLVER_WORKERS":       4,
     "SOLVER_SEED":          1,
 }
 
