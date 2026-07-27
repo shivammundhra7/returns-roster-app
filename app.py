@@ -11,18 +11,6 @@ INPUT SHEETS
   Usual    : Previous_Month_Attendance, Night_Preferences, Planned_Leaves
   Optional : Config, Roles_Config, Shift_Map, Current_Roster, History
 
-WHAT EACH OPTIONAL SHEET DOES
-  Config        : key/value overrides for every number/weight (see DEFAULTS below).
-  Roles_Config  : per-role flags — Day_Only (Y/N), Flat_WO (Y/N), Night_Lo/Night_Hi.
-  Shift_Map     : Token -> Type (Day/Night/Off/Leave) so each dept maps its own codes.
-  Current_Roster: a previously generated roster, used to FREEZE part of the plan:
-                    - FREEZE_THROUGH_DATE blank -> lock the whole existing roster; only
-                      employees NOT in it (new joiners) are built, from their join date.
-                    - FREEZE_THROUGH_DATE set   -> lock days on/before that date for
-                      everyone, re-optimise the rest (mid-month re-plan).
-  History       : Emp_ID, Cumulative_Nights, Cumulative_WeekendOffs from prior months,
-                  for cross-month fairness (enable with W_CUM_NIGHT_FAIR > 0).
-
 Run with:
     pip install streamlit pandas numpy ortools xlsxwriter openpyxl
     streamlit run app.py
@@ -70,7 +58,6 @@ DEFAULTS = {
     "SOLVER_WORKERS":       8,
     "SOLVER_SEED":          1,       # fixed seed for reproducible runs
 }
-# FREEZE_THROUGH_DATE handled separately (it's a date, default None).
 
 DEFAULT_SHIFT_MAP = {
     "P-M": "Day", "P-E": "Day", "P-D": "Day", "M": "Day", "E": "Day", "D": "Day",
@@ -89,9 +76,6 @@ ROLE_ALIASES = {"job role", "jobrole", "role", "department", "dept"}
 # SMALL HELPERS
 # ======================================================================
 def parse_dates(series, dayfirst=True):
-    """Robust to mixed date formats in one column (e.g. '01-07-2026' and '7/22/2026').
-    Fast path assumes one format; if anything fails, infer per element, then fall back
-    to element-wise parsing that tries both day-first and month-first."""
     with pywarnings.catch_warnings():
         pywarnings.simplefilter("ignore")
         out = pd.to_datetime(series, dayfirst=dayfirst, errors="coerce")
@@ -125,14 +109,12 @@ def clean_num(x):
 
 
 def coerce_to(default, raw):
-    """Coerce a Config value to the type of its default. A blank value keeps the default,
-    so an empty cell never silently turns a setting off."""
     if raw is None or (isinstance(raw, float) and math.isnan(raw)):
         return default
     s = str(raw).strip()
-    if s == "":                                        # blank cell -> keep the default
+    if s == "":
         return default
-    if isinstance(default, bool):                      # bool must be checked before int
+    if isinstance(default, bool):
         return s.lower() in ("true", "1", "yes", "y", "t")
     if isinstance(default, int):
         try:
@@ -148,8 +130,6 @@ def coerce_to(default, raw):
 
 
 def parse_band_value(val):
-    """Recover (min, max) night band. Handles 'A-B' text and the Excel-date glitch
-    where e.g. '7-12' is stored as 12-July (month & day are the two numbers typed)."""
     if val is None or (isinstance(val, float) and math.isnan(val)):
         return None
     if isinstance(val, (pd.Timestamp, datetime, date)):
@@ -271,7 +251,7 @@ def make_classifier(shift_map):
 
 
 # ======================================================================
-# VALIDATION (Tier 1) — runs before the solver
+# VALIDATION
 # ======================================================================
 def validate(df_emp, df_targets, df_prev, df_prefs, df_leaves, days, emp_preview):
     errors, warnings = [], []
@@ -283,25 +263,22 @@ def validate(df_emp, df_targets, df_prev, df_prefs, df_leaves, days, emp_preview
         if col not in df_targets.columns:
             errors.append(f"Daily_Targets is missing required column '{col}'.")
     if errors:
-        return errors, warnings  # can't go further without these
+        return errors, warnings
 
     if not days:
         errors.append("Daily_Targets has no readable dates.")
         return errors, warnings
 
-    # contiguous calendar
     expected = pd.date_range(days[0], days[-1])
     missing = [d.strftime("%d-%b") for d in expected if pd.Timestamp(d) not in set(days)]
     if missing:
         errors.append(f"Daily_Targets dates are not contiguous. Missing day(s): {', '.join(missing[:8])}"
                       + (" ..." if len(missing) > 8 else ""))
 
-    # duplicate employees
     dups = df_emp["Emp_ID"][df_emp["Emp_ID"].duplicated()].unique().tolist()
     if dups:
         warnings.append(f"Duplicate Emp_IDs in Employee_Master: {', '.join(map(str, dups[:8]))}.")
 
-    # gender values
     bad_g = sorted(set(df_emp["Gender"].dropna().astype(str)) - {"Male", "Female"})
     if bad_g:
         warnings.append(f"Unexpected Gender values (expected Male/Female): {', '.join(bad_g[:8])}.")
@@ -318,7 +295,6 @@ def validate(df_emp, df_targets, df_prev, df_prefs, df_leaves, days, emp_preview
             warnings.append(f"{len(miss)} Emp_ID(s) in Planned_Leaves are not in Employee_Master "
                             f"(ignored): {', '.join(map(str, miss[:6]))}.")
 
-    # role coverage
     roles_master = set(df_emp["Role"].dropna().astype(str).str.strip())
     roles_targets = set(df_targets["Role"].dropna().astype(str).str.strip())
     for r in sorted(roles_master - roles_targets):
@@ -327,12 +303,10 @@ def validate(df_emp, df_targets, df_prev, df_prefs, df_leaves, days, emp_preview
     for r in sorted(roles_targets - roles_master):
         warnings.append(f"Role '{r}' has Daily_Targets but no staff in Employee_Master.")
 
-    # loads numeric/positive
     bad_loads = df_targets["Daily_Load"].apply(clean_num)
     if bad_loads.isna().any() or (bad_loads.dropna() <= 0).any():
         warnings.append("Some Daily_Load values are missing, non-numeric, or <= 0 — check the load column.")
 
-    # night bands recovered from dates / inverted
     date_recovered, inverted = [], []
     for eid, info in emp_preview.items():
         if info.get("from_date"):
@@ -345,14 +319,12 @@ def validate(df_emp, df_targets, df_prev, df_prefs, df_leaves, days, emp_preview
     if inverted:
         warnings.append(f"Night band min > max for: {', '.join(inverted[:6])}.")
 
-    # per-role night feasibility pre-scan
-    active_avg = {}
     for r in roles_master:
         n_role = sum(1 for v in emp_preview.values() if v["role"] == r)
         n_elig = sum(1 for v in emp_preview.values() if v["role"] == r and v["eligible"])
         if n_role == 0:
             continue
-        need_night = math.floor(0.47 * n_role * 0.88)  # rough: 47% of ~88% working
+        need_night = math.floor(0.47 * n_role * 0.88)
         if n_elig < need_night:
             warnings.append(f"Role '{r}': only {n_elig} night-eligible of {n_role}; the ~47-49% night "
                             f"split may be unreachable on busy days (needs ≈{need_night}).")
@@ -460,7 +432,6 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 pref_minmax = d3.set_index("Emp_ID")[["Min_Nights", "Max_Nights"]].to_dict("index")
 
             def get_band(emp_id, gender):
-                """(min, max, is_default, from_date)."""
                 if gender != "Male":
                     return 0, 0, False, False
                 if emp_id in pref_minmax:
@@ -487,7 +458,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 for _, r in df_leaves.dropna(subset=["Date"]).iterrows():
                     leave_by_emp.setdefault(r["Emp_ID"], set()).add(pd.Timestamp(r["Date"]).normalize())
 
-            # ---------- current roster (for freeze / new-joiner) ----------
+            # ---------- current roster (freeze / re-plan) ----------
             current = {}
             if not df_current.empty and "Emp_ID" in df_current.columns:
                 cur_date_cols = [c for c in df_current.columns if c in label_to_idx]
@@ -498,14 +469,13 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             freeze_date = cfg["FREEZE_THROUGH_DATE"]
 
             def lock_for(eid, i):
-                """Return 'D'/'N'/'WOD' if cell (eid, day i) must be frozen, else None."""
                 if eid not in current:
                     return None
                 val = current[eid].get(i)
                 if val not in ("D", "N", "WOD"):
                     return None
                 if freeze_date is None:
-                    return val                      # lock whole existing roster (new-joiner mode)
+                    return val
                 return val if days[i] <= freeze_date else None
 
             # ---------- per-employee state ----------
@@ -521,9 +491,6 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 sched = [i for i, d in enumerate(days)
                          if ((doj is None) or (doj.normalize() <= d)) and d not in leave_by_emp.get(eid, set())]
                 active_days = sum(1 for d in days if (doj is None) or (doj.normalize() <= d))
-                # Week-offs = the department's monthly figure, prorated by how much of the period
-                # the person is present. A full-period employee gets exactly WO_PER_MONTH, whether
-                # the period is 30, 31, or 35 days — period length never silently changes it.
                 entitlement = max(0, min(int(round(cfg["WO_PER_MONTH"] * active_days / num_days)), len(sched)))
 
                 june_work, prev_nights = [], 0
@@ -579,7 +546,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                         model.Add(dv + ov == 1)
                     day_v[(eid, i)] = dv
                     wo_v[(eid, i)] = ov
-                    lk = lock_for(eid, i)               # freeze cells from a Current_Roster
+                    lk = lock_for(eid, i)
                     if lk == "D":
                         model.Add(dv == 1)
                     elif lk == "WOD":
@@ -610,7 +577,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                             model.Add(NV(eid, i) + day_v[(eid, i + 1)] <= 1)
                             model.Add(day_v[(eid, i)] + NV(eid, i + 1) <= 1)
 
-            # HARD: <= max consecutive working days (spans previous month)
+            # HARD: <= max consecutive working days
             WIN = cfg["MAX_CONSEC_WORK_DAYS"] + 1
             for eid, e in emp.items():
                 seq = [("c", v) for v in e["june_tail"]]
@@ -678,17 +645,30 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                     model.Add(dev >= tgt - woexpr)
                     obj_wo_load.append(dev)
 
-            # SOFT: monthly night-preference band
+            # ==========================================================
+            # SOFT: monthly night-preference band (QUADRATIC BALANCING)
+            # Mathematically prefers 15 errors of 1 day (15 * 1^2 = 15 penalty pts)
+            # over 1 error of 15 days (1 * 15^2 = 225 penalty pts).
+            # ==========================================================
             for eid, e in emp.items():
                 if not e["sched"]:
                     continue
                 tot = sum(NV(eid, i) for i in e["sched"])
                 L = len(e["sched"])
+                
                 u = model.NewIntVar(0, L, f"pu_{eid}")
                 o = model.NewIntVar(0, L, f"po_{eid}")
+                
                 model.Add(u >= e["mn"] - tot)
                 model.Add(o >= tot - e["mx"])
-                obj_pref += [u, o]
+                
+                u_sq = model.NewIntVar(0, L * L, f"pu_sq_{eid}")
+                o_sq = model.NewIntVar(0, L * L, f"po_sq_{eid}")
+                
+                model.AddMultiplicationEquality(u_sq, [u, u])
+                model.AddMultiplicationEquality(o_sq, [o, o])
+                
+                obj_pref += [u_sq, o_sq]
 
             # SOFT: discourage 7+ working-day runs
             for eid, e in emp.items():
@@ -703,28 +683,48 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                         model.Add(sv >= sum(ex) + sum(v for t, v in w if t == "c") - 6)
                         obj_streak.append(sv)
 
-            # SOFT: break long NIGHT stretches with a DAY stretch (everyone who works nights).
-            # nphase[i] = consecutive nights up to day i. A DAY shift resets it to 0; a week-off
-            # CARRIES the count forward (a rest day alone is NOT a break). So the only way to end
-            # a long night stretch is to actually work a stretch of day shifts — which is the ask.
+            # ==========================================================
+            # SOFT: Night shift run logic
+            # - <= 15 Nights target: Apply night-run cap to gap night blocks.
+            # - >= 16 Nights target: Bypass night-run cap & enforce continuous nights
+            #   (forbids Day shifts from being scheduled between Night shifts).
+            # ==========================================================
             CAP = cfg["MAX_NIGHT_RUN"]
             for eid, e in emp.items():
-                if (not e["eligible"]) or e["mx"] <= CAP:     # can't exceed the cap -> nothing to split
+                if not e["eligible"]:
                     continue
-                nphase = {}
-                L = len(e["sched"])
-                for i in e["sched"]:
-                    base = nphase[i - 1] if (i - 1) in e["sched_set"] else 0
-                    ph = model.NewIntVar(0, L, f"ph_{eid}_{i}")
-                    model.Add(ph == base + 1).OnlyEnforceIf(night_v[(eid, i)])
-                    model.Add(ph == 0).OnlyEnforceIf(day_v[(eid, i)])
-                    model.Add(ph == base).OnlyEnforceIf(wo_v[(eid, i)])
-                    nphase[i] = ph
-                    pe = model.NewIntVar(0, L, f"pe_{eid}_{i}")
-                    model.Add(pe >= ph - CAP)                  # penalise nights beyond the cap
-                    obj_night_run.append(pe)
+                
+                # CASE 1: <= 15 Night shifts -> Enforce gapping via MAX_NIGHT_RUN penalty
+                if e["mx"] <= 15:
+                    if e["mx"] <= CAP:
+                        continue
+                    nphase = {}
+                    L = len(e["sched"])
+                    for i in e["sched"]:
+                        base = nphase[i - 1] if (i - 1) in e["sched_set"] else 0
+                        ph = model.NewIntVar(0, L, f"ph_{eid}_{i}")
+                        model.Add(ph == base + 1).OnlyEnforceIf(night_v[(eid, i)])
+                        model.Add(ph == 0).OnlyEnforceIf(day_v[(eid, i)])
+                        model.Add(ph == base).OnlyEnforceIf(wo_v[(eid, i)])
+                        nphase[i] = ph
+                        
+                        pe = model.NewIntVar(0, L, f"pe_{eid}_{i}")
+                        model.Add(pe >= ph - CAP)
+                        obj_night_run.append(pe)
+                
+                # CASE 2: >= 16 Night shifts -> Must be continuous (no Day shifts between Night shifts)
+                else:
+                    sched_list = e["sched"]
+                    for idx_i in range(len(sched_list)):
+                        i = sched_list[idx_i]
+                        for idx_j in range(idx_i + 2, len(sched_list)):
+                            j = sched_list[idx_j]
+                            for idx_k in range(idx_i + 1, idx_j):
+                                k = sched_list[idx_k]
+                                if (eid, k) in day_v and (eid, i) in night_v and (eid, j) in night_v:
+                                    model.Add(day_v[(eid, k)] == 0).OnlyEnforceIf([night_v[(eid, i)], night_v[(eid, j)]])
 
-            # SOFT (optional): cross-month cumulative night fairness — minimise spread of totals
+            # SOFT (optional): cross-month cumulative night fairness
             cum_nights = {}
             if not df_hist.empty and "Emp_ID" in df_hist.columns and "Cumulative_Nights" in df_hist.columns:
                 for _, r in df_hist.iterrows():
@@ -861,7 +861,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             report_df = pd.DataFrame(report) if report else pd.DataFrame(
                 [{"Type": "—", "Who": "—", "Detail": "All soft targets met."}])
 
-            # ---------- integrity checks (verify HARD rules actually hold) ----------
+            # ---------- integrity checks ----------
             checks = []
 
             def add_check(name, ok, detail=""):
