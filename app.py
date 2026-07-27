@@ -36,36 +36,47 @@ except Exception:
 # ======================================================================
 DEFAULTS = {
     "MAX_CONSEC_WORK_DAYS": 9,       # hard cap on consecutive working days
-    "WO_PER_MONTH":         4,       # week-offs for someone present the whole period (fixed, not scaled by period length)
-    "ENFORCE_SHIFT_BLOCKS": True,    # no Day<->Night switch without a rest day between
+    "WO_PER_MONTH":         4,       # week-offs for someone present the whole period
+    "ENFORCE_SHIFT_BLOCKS": True,    # no Night->Day or Night->Morning without rest
     "ALLOW_WO_FLEX":        0,       # 0 = exact monthly WO count; 1 = allow +/-1
+    
+    # Target Ratios
+    "MORNING_LO":           0.0,     # Morning share (0.0 defaults to 2-shift model)
+    "MORNING_HI":           0.0,
     "NIGHT_LO":             0.47,    # night share of WORKING staff, per role per day
     "NIGHT_HI":             0.49,
     "WO_LO":                0.08,    # week-off share of ACTIVE staff, per role per day
     "WO_HI":                0.16,
-    "SUNDAY_WO_BUMP":       0.03,    # extra WO fraction on Sundays (still clamped to band)
+    "SUNDAY_WO_BUMP":       0.03,    # extra WO fraction on Sundays
+    
     "PREF_DEFAULT_MAX":     20,      # night ceiling for a male with no stated preference
     "MAX_NIGHT_RUN":        6,       # longest night stretch before it's broken by a day stretch
-    "W_NIGHT_STAFF":        12,      # weights (priority). Higher = solver tries harder.
+    
+    # Penalty Weights
+    "W_MORNING_STAFF":      12,
+    "W_NIGHT_STAFF":        12,
     "W_WO_RANGE":           1000,
-    "W_PREF":               200,
+    "W_PREF":               200,     # NOTE: Now uses quadratic scaling (squares the error)
     "W_STREAK":             25,
     "W_WO_LOAD":            4,
     "W_NIGHT_RUN":          30,
-    "W_CUM_NIGHT_FAIR":     0,       # cross-month night fairness (needs History; 0 = off)
-    "W_STABILITY":          0,       # month-to-month day/night stability (0 = off)
+    "W_CUM_NIGHT_FAIR":     0,
+    "W_STABILITY":          0,
+    
+    # Solver Config
     "SOLVER_TIME_LIMIT":    120,
     "SOLVER_WORKERS":       8,
-    "SOLVER_SEED":          1,       # fixed seed for reproducible runs
+    "SOLVER_SEED":          1,
 }
 
 DEFAULT_SHIFT_MAP = {
-    "P-M": "Day", "P-E": "Day", "P-D": "Day", "M": "Day", "E": "Day", "D": "Day",
+    "P-M": "Morning", "M": "Morning",
+    "P-E": "Day", "P-D": "Day", "E": "Day", "D": "Day",
     "P-N": "Night", "N": "Night",
     "WOD": "Off", "WO": "Off",
     "L": "Leave", "L-D": "Leave", "L-N": "Leave", "A": "Leave", "A-D": "Leave", "A-N": "Leave",
 }
-DEFAULT_DAY_ONLY = {"RSTO Putter"}    # used only if no Roles_Config sheet is supplied
+DEFAULT_DAY_ONLY = {"RSTO Putter"}
 DEFAULT_FLAT_WO  = {"RSTO Putter"}
 
 META_COLS = {"Emp_ID", "Name", "NAME", "Gender", "Job Role", "Role"}
@@ -97,7 +108,6 @@ def parse_dates(series, dayfirst=True):
                 out = out.fillna(series.map(_one))
     return out
 
-
 def clean_num(x):
     if pd.isna(x):
         return float("nan")
@@ -107,41 +117,28 @@ def clean_num(x):
     except ValueError:
         return float("nan")
 
-
 def coerce_to(default, raw):
-    if raw is None or (isinstance(raw, float) and math.isnan(raw)):
-        return default
+    if raw is None or (isinstance(raw, float) and math.isnan(raw)): return default
     s = str(raw).strip()
-    if s == "":
-        return default
-    if isinstance(default, bool):
-        return s.lower() in ("true", "1", "yes", "y", "t")
+    if s == "": return default
+    if isinstance(default, bool): return s.lower() in ("true", "1", "yes", "y", "t")
     if isinstance(default, int):
-        try:
-            return int(float(s.replace(",", "")))
-        except ValueError:
-            return default
+        try: return int(float(s.replace(",", "")))
+        except ValueError: return default
     if isinstance(default, float):
-        try:
-            return float(s.replace(",", ""))
-        except ValueError:
-            return default
+        try: return float(s.replace(",", ""))
+        except ValueError: return default
     return s
 
-
 def parse_band_value(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)):
-        return None
+    if val is None or (isinstance(val, float) and math.isnan(val)): return None
     if isinstance(val, (pd.Timestamp, datetime, date)):
         lo, hi = sorted((int(val.month), int(val.day)))
         return (lo, hi) if 0 <= lo <= 31 and 0 <= hi <= 31 else None
     nums = [int(x) for x in re.findall(r"\d+", str(val)) if 0 <= int(x) <= 31]
-    if len(nums) >= 2:
-        return min(nums[0], nums[1]), max(nums[0], nums[1])
-    if len(nums) == 1:
-        return nums[0], nums[0]
+    if len(nums) >= 2: return min(nums[0], nums[1]), max(nums[0], nums[1])
+    if len(nums) == 1: return nums[0], nums[0]
     return None
-
 
 def normalize_headers(df):
     df.columns = [str(c).strip() for c in df.columns]
@@ -153,7 +150,6 @@ def normalize_headers(df):
     if "Emp_ID" in df.columns:
         df["Emp_ID"] = df["Emp_ID"].astype(str).str.strip()
     return df
-
 
 def read_sheet(xls, name, required_cols=None):
     try:
@@ -186,7 +182,6 @@ def load_config(xls):
     cfg["FREEZE_THROUGH_DATE"] = freeze
     return cfg
 
-
 def load_roles_config(xls):
     df = read_sheet(xls, "Roles_Config")
     if df.empty or "Role" not in df.columns:
@@ -194,145 +189,50 @@ def load_roles_config(xls):
     cols = {c.lower(): c for c in df.columns}
     day_only, flat_wo, band = set(), set(), {}
 
-    def yes(v):
-        return str(v).strip().lower() in ("y", "yes", "true", "1", "t")
+    def yes(v): return str(v).strip().lower() in ("y", "yes", "true", "1", "t")
 
     for _, r in df.iterrows():
         role = str(r["Role"]).strip()
-        if not role or role.lower() == "nan":
-            continue
-        if "day_only" in cols and yes(r[cols["day_only"]]):
-            day_only.add(role)
-        if "flat_wo" in cols and yes(r[cols["flat_wo"]]):
-            flat_wo.add(role)
+        if not role or role.lower() == "nan": continue
+        if "day_only" in cols and yes(r[cols["day_only"]]): day_only.add(role)
+        if "flat_wo" in cols and yes(r[cols["flat_wo"]]): flat_wo.add(role)
         lo = r[cols["night_lo"]] if "night_lo" in cols else None
         hi = r[cols["night_hi"]] if "night_hi" in cols else None
         if pd.notna(lo) and pd.notna(hi):
-            try:
-                band[role] = (float(lo), float(hi))
-            except ValueError:
-                pass
+            try: band[role] = (float(lo), float(hi))
+            except ValueError: pass
     return day_only, flat_wo, band
-
 
 def load_shift_map(xls):
     df = read_sheet(xls, "Shift_Map")
-    if df.empty:
-        return dict(DEFAULT_SHIFT_MAP)
+    if df.empty: return dict(DEFAULT_SHIFT_MAP)
     cols = {c.lower(): c for c in df.columns}
     tcol = cols.get("token") or df.columns[0]
     ycol = cols.get("type") or (df.columns[1] if len(df.columns) > 1 else None)
-    if ycol is None:
-        return dict(DEFAULT_SHIFT_MAP)
+    if ycol is None: return dict(DEFAULT_SHIFT_MAP)
     m = {}
     for _, r in df.iterrows():
         tok = str(r[tcol]).strip().upper()
         typ = str(r[ycol]).strip().capitalize()
-        if tok and typ in ("Day", "Night", "Off", "Leave"):
+        if tok and typ in ("Morning", "Day", "Night", "Off", "Leave"):
             m[tok] = typ
     return m or dict(DEFAULT_SHIFT_MAP)
 
-
 def make_classifier(shift_map):
     upmap = {k.upper(): v for k, v in shift_map.items()}
-
     def classify(val):
-        if val is None:
-            return "NONE"
+        if val is None: return "NONE"
         s = str(val).strip().upper()
-        if s in ("", "NAN", "NONE", "0", "0.0"):
-            return "NONE"
+        if s in ("", "NAN", "NONE", "0", "0.0"): return "NONE"
         if s in upmap:
-            return {"Day": "D", "Night": "N", "Off": "OFF", "Leave": "LEAVE"}[upmap[s]]
-        if s.endswith("-N"):
-            return "N"
+            return {"Morning": "M", "Day": "D", "Night": "N", "Off": "OFF", "Leave": "LEAVE"}[upmap[s]]
+        if s.endswith("-M"): return "M"
+        if s.endswith("-N"): return "N"
         return "D"
     return classify
 
-
 # ======================================================================
-# VALIDATION
-# ======================================================================
-def validate(df_emp, df_targets, df_prev, df_prefs, df_leaves, days, emp_preview):
-    errors, warnings = [], []
-
-    for col in ("Emp_ID", "Role", "Gender", "Date_of_Joining"):
-        if col not in df_emp.columns:
-            errors.append(f"Employee_Master is missing required column '{col}'.")
-    for col in ("Date", "Role", "Daily_Load"):
-        if col not in df_targets.columns:
-            errors.append(f"Daily_Targets is missing required column '{col}'.")
-    if errors:
-        return errors, warnings
-
-    if not days:
-        errors.append("Daily_Targets has no readable dates.")
-        return errors, warnings
-
-    expected = pd.date_range(days[0], days[-1])
-    missing = [d.strftime("%d-%b") for d in expected if pd.Timestamp(d) not in set(days)]
-    if missing:
-        errors.append(f"Daily_Targets dates are not contiguous. Missing day(s): {', '.join(missing[:8])}"
-                      + (" ..." if len(missing) > 8 else ""))
-
-    dups = df_emp["Emp_ID"][df_emp["Emp_ID"].duplicated()].unique().tolist()
-    if dups:
-        warnings.append(f"Duplicate Emp_IDs in Employee_Master: {', '.join(map(str, dups[:8]))}.")
-
-    bad_g = sorted(set(df_emp["Gender"].dropna().astype(str)) - {"Male", "Female"})
-    if bad_g:
-        warnings.append(f"Unexpected Gender values (expected Male/Female): {', '.join(bad_g[:8])}.")
-
-    master_ids = set(df_emp["Emp_ID"])
-    if "Emp_ID" in df_prefs.columns:
-        miss = sorted(set(df_prefs["Emp_ID"].dropna()) - master_ids)
-        if miss:
-            warnings.append(f"{len(miss)} Emp_ID(s) in Night_Preferences are not in Employee_Master "
-                            f"(ignored): {', '.join(map(str, miss[:6]))}.")
-    if "Emp_ID" in df_leaves.columns and not df_leaves.empty:
-        miss = sorted(set(df_leaves["Emp_ID"].dropna()) - master_ids)
-        if miss:
-            warnings.append(f"{len(miss)} Emp_ID(s) in Planned_Leaves are not in Employee_Master "
-                            f"(ignored): {', '.join(map(str, miss[:6]))}.")
-
-    roles_master = set(df_emp["Role"].dropna().astype(str).str.strip())
-    roles_targets = set(df_targets["Role"].dropna().astype(str).str.strip())
-    for r in sorted(roles_master - roles_targets):
-        warnings.append(f"Role '{r}' has staff but no Daily_Targets rows — it will be rostered "
-                        f"but week-offs won't track load.")
-    for r in sorted(roles_targets - roles_master):
-        warnings.append(f"Role '{r}' has Daily_Targets but no staff in Employee_Master.")
-
-    bad_loads = df_targets["Daily_Load"].apply(clean_num)
-    if bad_loads.isna().any() or (bad_loads.dropna() <= 0).any():
-        warnings.append("Some Daily_Load values are missing, non-numeric, or <= 0 — check the load column.")
-
-    date_recovered, inverted = [], []
-    for eid, info in emp_preview.items():
-        if info.get("from_date"):
-            date_recovered.append(eid)
-        if info["mn"] > info["mx"]:
-            inverted.append(eid)
-    if date_recovered:
-        warnings.append(f"{len(date_recovered)} night preference(s) were recovered from an Excel date "
-                        f"(verify): {', '.join(date_recovered[:6])}. Tip: use Min_Nights/Max_Nights columns.")
-    if inverted:
-        warnings.append(f"Night band min > max for: {', '.join(inverted[:6])}.")
-
-    for r in roles_master:
-        n_role = sum(1 for v in emp_preview.values() if v["role"] == r)
-        n_elig = sum(1 for v in emp_preview.values() if v["role"] == r and v["eligible"])
-        if n_role == 0:
-            continue
-        need_night = math.floor(0.47 * n_role * 0.88)
-        if n_elig < need_night:
-            warnings.append(f"Role '{r}': only {n_elig} night-eligible of {n_role}; the ~47-49% night "
-                            f"split may be unreachable on busy days (needs ≈{need_night}).")
-    return errors, warnings
-
-
-# ======================================================================
-# UI
+# UI & EXECUTION
 # ======================================================================
 st.set_page_config(page_title="Roster Generator (CP-SAT)", page_icon="📅", layout="centered")
 st.title("📅 Roster Generator — operational tool")
@@ -370,12 +270,6 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
 
             df_emp["Role"] = df_emp["Role"].astype(str).str.strip()
             df_targets["Role"] = df_targets["Role"].astype(str).str.strip()
-            _raw_dates = df_targets["Date"].astype(str)
-            date_fmt_warn = None
-            if _raw_dates.str.contains("/").any() and _raw_dates.str.contains("-").any():
-                date_fmt_warn = ("Daily_Targets 'Date' column mixes '/' and '-' formats. It was parsed "
-                                 "safely, but please standardize to one day-first format "
-                                 "(e.g. 01-07-2026) so the roster period is never misread.")
             df_targets["Date"] = parse_dates(df_targets["Date"], dayfirst=True)
             df_targets = df_targets.dropna(subset=["Date"])
             df_targets["Daily_Load"] = df_targets["Daily_Load"].apply(clean_num)
@@ -432,14 +326,11 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 pref_minmax = d3.set_index("Emp_ID")[["Min_Nights", "Max_Nights"]].to_dict("index")
 
             def get_band(emp_id, gender):
-                if gender != "Male":
-                    return 0, 0, False, False
+                if gender != "Male": return 0, 0, False, False
                 if emp_id in pref_minmax:
                     row = pref_minmax[emp_id]
-                    try:
-                        return int(row["Min_Nights"]), int(row["Max_Nights"]), False, False
-                    except (ValueError, TypeError):
-                        pass
+                    try: return int(row["Min_Nights"]), int(row["Max_Nights"]), False, False
+                    except (ValueError, TypeError): pass
                 if emp_id in pref_str:
                     raw = pref_str[emp_id]
                     parsed = parse_band_value(raw)
@@ -469,13 +360,10 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             freeze_date = cfg["FREEZE_THROUGH_DATE"]
 
             def lock_for(eid, i):
-                if eid not in current:
-                    return None
+                if eid not in current: return None
                 val = current[eid].get(i)
-                if val not in ("D", "N", "WOD"):
-                    return None
-                if freeze_date is None:
-                    return val
+                if val not in ("M", "D", "N", "WOD"): return None
+                if freeze_date is None: return val
                 return val if days[i] <= freeze_date else None
 
             # ---------- per-employee state ----------
@@ -499,7 +387,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                     prow = prev_idx.loc[eid]
                     for c in prev_date_cols:
                         cl = classify(prow[c])
-                        june_work.append(1 if cl in ("D", "N") else 0)
+                        june_work.append(1 if cl in ("M", "D", "N") else 0)
                         prev_nights += (cl == "N")
                     last_class = classify(prow[prev_date_cols[-1]])
                 june_tail = june_work[-cfg["MAX_CONSEC_WORK_DAYS"]:] if june_work else []
@@ -509,73 +397,58 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                     mn=mn, mx=mx, is_def=is_def, from_date=from_date,
                     sched=sched, sched_set=set(sched), entitlement=entitlement,
                     june_tail=june_tail, prev_nights=prev_nights, prev_work=sum(june_work),
-                    prev_last_working=last_class in ("D", "N"),
-                    prev_shift=last_class if last_class in ("D", "N") else None,
+                    prev_last_working=last_class in ("M", "D", "N"),
+                    prev_shift=last_class if last_class in ("M", "D", "N") else None,
                 )
 
             night_roles = {r for r in roles if any(e["eligible"] and e["role"] == r for e in emp.values())}
-
-            # ---------- validation ----------
-            errors, warnings = validate(df_emp, df_targets, df_prev, df_prefs, df_leaves, days, emp)
-            if date_fmt_warn:
-                warnings.append(date_fmt_warn)
-            if errors:
-                st.error("Cannot generate — fix these first:")
-                for e in errors:
-                    st.write(f"• {e}")
-                st.stop()
-            if warnings:
-                with st.expander(f"⚠️ {len(warnings)} warning(s) — review, but generation will proceed"):
-                    for w in warnings:
-                        st.write(f"• {w}")
 
             # ==========================================================
             # BUILD MODEL
             # ==========================================================
             model = cp_model.CpModel()
-            day_v, night_v, wo_v = {}, {}, {}
+            day_v, night_v, morning_v, wo_v = {}, {}, {}, {}
             for eid, e in emp.items():
                 for i in e["sched"]:
+                    mv = model.NewBoolVar(f"m_{eid}_{i}")
                     dv = model.NewBoolVar(f"d_{eid}_{i}")
                     ov = model.NewBoolVar(f"o_{eid}_{i}")
                     if e["eligible"]:
                         nv = model.NewBoolVar(f"n_{eid}_{i}")
-                        model.Add(dv + nv + ov == 1)
+                        model.Add(mv + dv + nv + ov == 1)
                         night_v[(eid, i)] = nv
                     else:
-                        model.Add(dv + ov == 1)
+                        model.Add(mv + dv + ov == 1)
+                    
+                    morning_v[(eid, i)] = mv
                     day_v[(eid, i)] = dv
                     wo_v[(eid, i)] = ov
+                    
                     lk = lock_for(eid, i)
-                    if lk == "D":
-                        model.Add(dv == 1)
-                    elif lk == "WOD":
-                        model.Add(ov == 1)
-                    elif lk == "N" and e["eligible"]:
-                        model.Add(nv == 1)
+                    if lk == "M": model.Add(mv == 1)
+                    elif lk == "D": model.Add(dv == 1)
+                    elif lk == "WOD": model.Add(ov == 1)
+                    elif lk == "N" and e["eligible"]: model.Add(nv == 1)
 
-            def NV(eid, i):
-                return night_v.get((eid, i), 0)
+            def MV(eid, i): return morning_v.get((eid, i), 0)
+            def NV(eid, i): return night_v.get((eid, i), 0)
+            def WV(eid, i): return morning_v[(eid, i)] + day_v[(eid, i)] + NV(eid, i)
 
-            def WV(eid, i):
-                n = night_v.get((eid, i))
-                return day_v[(eid, i)] + n if n is not None else day_v[(eid, i)]
-
-            obj_night, obj_wo_range, obj_wo_load, obj_pref, obj_streak, obj_night_run = [], [], [], [], [], []
+            obj_night, obj_morning, obj_wo_range, obj_wo_load, obj_pref, obj_streak, obj_night_run = [], [], [], [], [], [], []
             obj_cum, obj_stab = [], []
 
-            # HARD: shift blocks
+            # HARD: shift blocks (Rest Days between transitions)
             if cfg["ENFORCE_SHIFT_BLOCKS"]:
                 for eid, e in emp.items():
                     if e["prev_last_working"] and 0 in e["sched_set"]:
-                        if e["prev_shift"] == "N" and (eid, 0) in day_v:
+                        if e["prev_shift"] == "N":
+                            model.Add(morning_v[(eid, 0)] == 0)
                             model.Add(day_v[(eid, 0)] == 0)
-                        elif e["prev_shift"] == "D" and (eid, 0) in night_v:
-                            model.Add(night_v[(eid, 0)] == 0)
                     for i in range(num_days - 1):
                         if i in e["sched_set"] and (i + 1) in e["sched_set"]:
+                            # Cannot transition from Night directly to Morning or Day
+                            model.Add(NV(eid, i) + morning_v[(eid, i + 1)] <= 1)
                             model.Add(NV(eid, i) + day_v[(eid, i + 1)] <= 1)
-                            model.Add(day_v[(eid, i)] + NV(eid, i + 1) <= 1)
 
             # HARD: <= max consecutive working days
             WIN = cfg["MAX_CONSEC_WORK_DAYS"] + 1
@@ -605,6 +478,23 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 for i in e["sched"]:
                     sched_by_day_role[(i, e["role"])].append(eid)
 
+            # SOFT: Morning split target
+            if cfg["MORNING_HI"] > 0.0:
+                for i in range(num_days):
+                    for r in roles:
+                        members = sched_by_day_role[(i, r)]
+                        if not members: continue
+                        mlo = int(round(cfg["MORNING_LO"] * 100))
+                        mhi = int(round(cfg["MORNING_HI"] * 100))
+                        Wexpr = sum(WV(m, i) for m in members)
+                        Mexpr = sum(MV(m, i) for m in members)
+                        cap = 100 * len(members)
+                        under_m = model.NewIntVar(0, cap, f"mu_{i}_{r}")
+                        over_m = model.NewIntVar(0, cap, f"mo_{i}_{r}")
+                        model.Add(under_m >= mlo * Wexpr - 100 * Mexpr)
+                        model.Add(over_m >= 100 * Mexpr - mhi * Wexpr)
+                        obj_morning += [under_m, over_m]
+
             # SOFT: night split (per role band)
             for i in range(num_days):
                 for r in roles:
@@ -627,8 +517,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 for r in roles:
                     members = sched_by_day_role[(i, r)]
                     A = len(members)
-                    if A == 0:
-                        continue
+                    if A == 0: continue
                     woexpr = sum(wo_v[(m, i)] for m in members)
                     if zero_wo.get((d, r), False):
                         model.Add(woexpr == 0)
@@ -687,17 +576,14 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             # SOFT: Night shift run logic
             # - <= 15 Nights target: Apply night-run cap to gap night blocks.
             # - >= 16 Nights target: Bypass night-run cap & enforce continuous nights
-            #   (forbids Day shifts from being scheduled between Night shifts).
+            #   (forbids Day/Morning shifts from being scheduled between Night shifts).
             # ==========================================================
             CAP = cfg["MAX_NIGHT_RUN"]
             for eid, e in emp.items():
-                if not e["eligible"]:
-                    continue
+                if not e["eligible"]: continue
                 
-                # CASE 1: <= 15 Night shifts -> Enforce gapping via MAX_NIGHT_RUN penalty
                 if e["mx"] <= 15:
-                    if e["mx"] <= CAP:
-                        continue
+                    if e["mx"] <= CAP: continue
                     nphase = {}
                     L = len(e["sched"])
                     for i in e["sched"]:
@@ -705,14 +591,13 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                         ph = model.NewIntVar(0, L, f"ph_{eid}_{i}")
                         model.Add(ph == base + 1).OnlyEnforceIf(night_v[(eid, i)])
                         model.Add(ph == 0).OnlyEnforceIf(day_v[(eid, i)])
+                        model.Add(ph == 0).OnlyEnforceIf(morning_v[(eid, i)])
                         model.Add(ph == base).OnlyEnforceIf(wo_v[(eid, i)])
                         nphase[i] = ph
                         
                         pe = model.NewIntVar(0, L, f"pe_{eid}_{i}")
                         model.Add(pe >= ph - CAP)
                         obj_night_run.append(pe)
-                
-                # CASE 2: >= 16 Night shifts -> Must be continuous (no Day shifts between Night shifts)
                 else:
                     sched_list = e["sched"]
                     for idx_i in range(len(sched_list)):
@@ -723,6 +608,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                                 k = sched_list[idx_k]
                                 if (eid, k) in day_v and (eid, i) in night_v and (eid, j) in night_v:
                                     model.Add(day_v[(eid, k)] == 0).OnlyEnforceIf([night_v[(eid, i)], night_v[(eid, j)]])
+                                    model.Add(morning_v[(eid, k)] == 0).OnlyEnforceIf([night_v[(eid, i)], night_v[(eid, j)]])
 
             # SOFT (optional): cross-month cumulative night fairness
             cum_nights = {}
@@ -743,11 +629,10 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                     model.Add(spread == maxT - minT)
                     obj_cum.append(spread)
 
-            # SOFT (optional): month-to-month day/night stability anchor
+            # SOFT (optional): month-to-month stability
             if cfg["W_STABILITY"] > 0:
                 for eid, e in emp.items():
-                    if not e["eligible"] or e["prev_work"] <= 0 or not e["sched"]:
-                        continue
+                    if not e["eligible"] or e["prev_work"] <= 0 or not e["sched"]: continue
                     share = e["prev_nights"] / e["prev_work"]
                     target = int(round(share * max(0, len(e["sched"]) - e["entitlement"])))
                     tot = sum(NV(eid, i) for i in e["sched"])
@@ -758,7 +643,8 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
 
             # OBJECTIVE
             model.Minimize(
-                cfg["W_NIGHT_STAFF"] * sum(obj_night)
+                cfg["W_MORNING_STAFF"] * sum(obj_morning)
+                + cfg["W_NIGHT_STAFF"] * sum(obj_night)
                 + cfg["W_WO_RANGE"] * sum(obj_wo_range)
                 + cfg["W_PREF"] * sum(obj_pref)
                 + cfg["W_STREAK"] * sum(obj_streak)
@@ -776,38 +662,35 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             status = solver.Solve(model)
             status_name = solver.StatusName(status)
             if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-                st.error(f"Solver returned {status_name}. The HARD constraints likely conflict "
-                         f"(e.g. exact WO count + 9-day cap with a long prior streak, or frozen cells "
-                         f"that break shift blocks). Try ALLOW_WO_FLEX=1 or relax the freeze.")
+                st.error(f"Solver returned {status_name}. The HARD constraints likely conflict. "
+                         f"Try ALLOW_WO_FLEX=1 or relax the freeze.")
                 st.stop()
 
             # ---------- EXTRACT ----------
             def cell(eid, i):
                 e = emp[eid]
                 d = days[i]
-                if (e["doj"] is not None) and (e["doj"].normalize() > d):
-                    return "Not Joined"
-                if d in leave_by_emp.get(eid, set()):
-                    return "L"
-                if i not in e["sched_set"]:
-                    return ""
-                if solver.Value(wo_v[(eid, i)]) == 1:
-                    return "WOD"
-                if (eid, i) in night_v and solver.Value(night_v[(eid, i)]) == 1:
-                    return "N"
+                if (e["doj"] is not None) and (e["doj"].normalize() > d): return "Not Joined"
+                if d in leave_by_emp.get(eid, set()): return "L"
+                if i not in e["sched_set"]: return ""
+                if solver.Value(wo_v[(eid, i)]) == 1: return "WOD"
+                if solver.Value(morning_v[(eid, i)]) == 1: return "M"
+                if (eid, i) in night_v and solver.Value(night_v[(eid, i)]) == 1: return "N"
                 return "D"
 
             rows = []
             for eid, e in emp.items():
                 rec = {"Emp_ID": eid, "Role": e["role"]}
-                nights = wos = 0
+                morns = nights = wos = 0
                 for i in range(num_days):
                     c = cell(eid, i)
                     rec[day_labels[i]] = c
+                    morns += (c == "M")
                     nights += (c == "N")
                     wos += (c == "WOD")
                 rec["Total_WOs"] = wos
                 rec["Total_Nights"] = nights
+                if cfg["MORNING_HI"] > 0: rec["Total_Mornings"] = morns
                 rec["Pref_Band"] = f"{e['mn']}-{e['mx']}" if e["eligible"] else "Day only"
                 rows.append(rec)
             roster_df = pd.DataFrame(rows).sort_values(["Role", "Emp_ID"]).reset_index(drop=True)
@@ -817,16 +700,20 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 d = days[i]
                 for r in roles:
                     members = sched_by_day_role[(i, r)]
-                    if not members:
-                        continue
-                    work = sum(1 for m in members if cell(m, i) in ("D", "N"))
+                    if not members: continue
+                    work = sum(1 for m in members if cell(m, i) in ("M", "D", "N"))
+                    morn = sum(1 for m in members if cell(m, i) == "M")
                     nig = sum(1 for m in members if cell(m, i) == "N")
                     woc = sum(1 for m in members if cell(m, i) == "WOD")
                     active = len(members)
                     nlo, nhi = night_band(r)
+                    mlo, mhi = int(round(cfg["MORNING_LO"]*100)), int(round(cfg["MORNING_HI"]*100))
+                    
                     summ.append({
                         "Date": day_labels[i], "Role": r, "Active": active, "Working": work,
-                        "Day": work - nig, "Night": nig,
+                        "Morning": morn, "Day": work - (morn + nig), "Night": nig,
+                        "Morning_%": round(100 * morn / work, 1) if work else 0,
+                        "Morning_target": f"{mlo}-{mhi}%" if mhi > 0 else "N/A",
                         "Night_%": round(100 * nig / work, 1) if work else 0,
                         "Night_target": f"{nlo}-{nhi}%" if r in night_roles else "Day only",
                         "WeekOffs": woc, "WO_%": round(100 * woc / active, 1) if active else 0,
@@ -837,8 +724,7 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
             # ---------- constraint report ----------
             report = []
             for eid, e in emp.items():
-                if not e["eligible"]:
-                    continue
+                if not e["eligible"]: continue
                 tot = sum(1 for i in range(num_days) if cell(eid, i) == "N")
                 if tot < e["mn"]:
                     report.append({"Type": "Night preference", "Who": eid,
@@ -863,41 +749,32 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
 
             # ---------- integrity checks ----------
             checks = []
-
             def add_check(name, ok, detail=""):
                 checks.append({"Check": name, "Result": "PASS" if ok else "FAIL", "Detail": detail})
 
             max_run, run_bad = 0, []
             for eid, e in emp.items():
-                seq = list(e["june_tail"]) + [1 if cell(eid, i) in ("D", "N") else 0 for i in range(num_days)]
+                seq = list(e["june_tail"]) + [1 if cell(eid, i) in ("M", "D", "N") else 0 for i in range(num_days)]
                 run = 0
                 for v in seq:
                     run = run + 1 if v else 0
                     max_run = max(max_run, run)
-                    if run > cfg["MAX_CONSEC_WORK_DAYS"]:
-                        run_bad.append(eid)
+                    if run > cfg["MAX_CONSEC_WORK_DAYS"]: run_bad.append(eid)
             add_check(f"No working run > {cfg['MAX_CONSEC_WORK_DAYS']} days", not run_bad,
                       f"longest run seen: {max_run}" if not run_bad else f"violations: {set(run_bad)}")
 
-            wo_bad = [eid for eid, e in emp.items()
-                      if not cfg["ALLOW_WO_FLEX"] and e["sched"]
+            wo_bad = [eid for eid, e in emp.items() if not cfg["ALLOW_WO_FLEX"] and e["sched"]
                       and sum(1 for i in range(num_days) if cell(eid, i) == "WOD") != e["entitlement"]]
-            add_check("Monthly week-off count == entitlement", not wo_bad,
-                      "" if not wo_bad else f"off for: {set(wo_bad)}")
-
-            no_night_bad = [eid for eid, e in emp.items()
-                            if not e["eligible"] and any(cell(eid, i) == "N" for i in range(num_days))]
-            add_check("Day-only / female staff have no nights", not no_night_bad,
-                      "" if not no_night_bad else f"violations: {set(no_night_bad)}")
+            add_check("Monthly week-off count == entitlement", not wo_bad, "" if not wo_bad else f"off for: {set(wo_bad)}")
 
             if cfg["ENFORCE_SHIFT_BLOCKS"]:
                 flip_bad = []
                 for eid, e in emp.items():
                     for i in range(num_days - 1):
                         if i in e["sched_set"] and (i + 1) in e["sched_set"]:
-                            if {cell(eid, i), cell(eid, i + 1)} == {"D", "N"}:
+                            if cell(eid, i) == "N" and cell(eid, i + 1) in ("M", "D"):
                                 flip_bad.append((eid, day_labels[i]))
-                add_check("No Day/Night switch without a rest day", not flip_bad,
+                add_check("No Night->Day or Night->Morning without rest", not flip_bad,
                           "" if not flip_bad else f"flips at: {flip_bad[:6]}")
 
             lock_bad = []
@@ -905,28 +782,25 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                 if eid in emp:
                     for i in range(num_days):
                         lk = lock_for(eid, i)
-                        if lk and cell(eid, i) != lk:
-                            lock_bad.append((eid, day_labels[i]))
-            add_check("Frozen cells preserved", not lock_bad,
-                      "" if not lock_bad else f"changed: {lock_bad[:6]}")
+                        if lk and cell(eid, i) != lk: lock_bad.append((eid, day_labels[i]))
+            add_check("Frozen cells preserved", not lock_bad, "" if not lock_bad else f"changed: {lock_bad[:6]}")
             checks_df = pd.DataFrame(checks)
 
             # ---------- objective breakdown ----------
-            def comp(terms):
-                return int(sum(solver.Value(v) for v in terms)) if terms else 0
+            def comp(terms): return int(sum(solver.Value(v) for v in terms)) if terms else 0
             breakdown = [
+                ("Morning staffing", cfg["W_MORNING_STAFF"] * comp(obj_morning)),
                 ("Night staffing", cfg["W_NIGHT_STAFF"] * comp(obj_night)),
                 ("Week-off range", cfg["W_WO_RANGE"] * comp(obj_wo_range)),
-                ("Night preference", cfg["W_PREF"] * comp(obj_pref)),
+                ("Night preference (Quadratic)", cfg["W_PREF"] * comp(obj_pref)),
                 ("Long work streaks", cfg["W_STREAK"] * comp(obj_streak)),
                 ("Week-off load shaping", cfg["W_WO_LOAD"] * comp(obj_wo_load)),
                 ("Night-run splitting", cfg["W_NIGHT_RUN"] * comp(obj_night_run)),
                 ("Cross-month fairness", cfg["W_CUM_NIGHT_FAIR"] * comp(obj_cum)),
                 ("Month-to-month stability", cfg["W_STABILITY"] * comp(obj_stab)),
             ]
-            breakdown_df = pd.DataFrame(
-                [{"Component": n, "Penalty": p} for n, p in breakdown if p > 0]
-                or [{"Component": "—", "Penalty": 0}])
+            breakdown_df = pd.DataFrame([{"Component": n, "Penalty": p} for n, p in breakdown if p > 0]
+                                        or [{"Component": "—", "Penalty": 0}])
 
             # ---------- write workbook ----------
             buf = io.BytesIO()
@@ -940,18 +814,12 @@ if uploaded_file is not None and ORTOOLS_OK and st.button("🚀 Generate Roster"
                     pd.DataFrame({"Warning": warnings}).to_excel(writer, index=False, sheet_name="Validation")
 
             month_name = days[0].strftime("%B_%Y")
-            new_joiners = [eid for eid in emp if current and eid not in current]
             mode = ("fresh full solve" if not current else
-                    (f"new-joiner build ({len(new_joiners)} new)" if freeze_date is None
-                     else f"re-plan from {freeze_date.strftime('%d-%b')}"))
+                    (f"new-joiner build" if freeze_date is None else f"re-plan from {freeze_date.strftime('%d-%b')}"))
             blocks_state = "ON" if cfg["ENFORCE_SHIFT_BLOCKS"] else "OFF"
             st.success(f"✅ {month_name.replace('_', ' ')} — {status_name} · mode: {mode} · "
                        f"{num_days}-day period · {cfg['WO_PER_MONTH']} week-offs each · "
-                       f"Day↔Night blocks: {blocks_state}")
-            if not cfg["ENFORCE_SHIFT_BLOCKS"]:
-                st.warning("Day↔Night shift blocks are OFF, so shifts can switch without a rest day. "
-                           "To require a rest day between Day and Night, set ENFORCE_SHIFT_BLOCKS = TRUE "
-                           "in the Config sheet (or remove that row to use the default, which is ON).")
+                       f"Shift blocks: {blocks_state}")
 
             all_pass = all(c["Result"] == "PASS" for c in checks)
             if not all_pass:
